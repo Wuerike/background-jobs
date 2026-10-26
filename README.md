@@ -46,18 +46,25 @@ docker compose down
 O volume `redis-data` é mantido ao parar ou recriar o container. O comando
 `docker compose down -v` também remove o volume e apaga os dados locais.
 
-## SDK local
+## SDK no WSL
 
-O SDK .NET 10.0.403 para Linux x64 foi instalado em `.dotnet/` na raiz do projeto, usando os [binários oficiais da Microsoft](https://learn.microsoft.com/en-us/dotnet/core/install/linux-scripted-manual).
-
-No Bash, a partir da raiz do projeto, configure a sessão:
+O projeto requer o SDK .NET 10. Para usar o SDK instalado no sistema Ubuntu 24.04
+do WSL, configure o repositório de pacotes da Microsoft e instale o SDK:
 
 ```bash
-export DOTNET_ROOT="$PWD/.dotnet"
-export PATH="$DOTNET_ROOT:$PATH"
-export DOTNET_CLI_HOME="$DOTNET_ROOT"
-export NUGET_PACKAGES="$DOTNET_ROOT/packages"
+sudo apt-get update
+sudo apt-get install -y ca-certificates wget
+wget https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
+sudo dpkg -i /tmp/packages-microsoft-prod.deb
+rm /tmp/packages-microsoft-prod.deb
+sudo apt-get update
+sudo apt-get install -y dotnet-sdk-10.0
+dotnet --version
 ```
+
+O último comando deve mostrar uma versão `10.0.x`. A instalação fica no WSL e
+não requer manter o SDK dentro do repositório. Para conferir todos os SDKs
+instalados, use `dotnet --list-sdks`.
 
 ## Compilar e executar
 
@@ -75,12 +82,9 @@ Os diretórios de saída são centralizados na pasta `build/` da raiz por `Direc
 
 A pasta `build/` é ignorada pelo Git.
 
-## Validação neste ambiente
-
-O build foi concluído com zero avisos e zero erros. Para contornar as restrições de escrita e de processos deste ambiente, após configurar o SDK local, foi usado:
+## Validar
 
 ```bash
-export XDG_RUNTIME_DIR=/tmp
-export XDG_DATA_HOME="$DOTNET_ROOT/.local/share"
-dotnet build BackgroundJobs.slnx --disable-build-servers -m:1
+dotnet restore BackgroundJobs.slnx
+dotnet build BackgroundJobs.slnx
 ```
