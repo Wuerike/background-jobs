@@ -8,6 +8,44 @@ Estrutura inicial em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 
 Não há implementação de jobs, processamento, persistência ou endpoints nesta etapa.
 
+## Redis local
+
+O storage escolhido para os jobs é Redis. O `compose.yaml` usa a imagem oficial
+`redis:8.2.10-alpine`, com volume persistente em `/data`, AOF habilitado e
+`appendfsync always` para sincronizar as escritas em disco antes de responder.
+A política `noeviction` impede a remoção automática de chaves por pressão de memória.
+Referência: [persistência do Redis](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/).
+
+Na raiz do projeto, com Docker e Docker Compose disponíveis, inicie o serviço:
+
+```bash
+docker compose up -d --wait redis
+docker compose exec redis redis-cli ping
+```
+
+O segundo comando deve retornar `PONG`. O serviço fica disponível apenas em
+`127.0.0.1:6379`, sem senha, para desenvolvimento local. A aplicação .NET executada
+no host deverá usar a connection string `127.0.0.1:6379`. A integração da aplicação
+com Redis ainda será implementada.
+
+Se a porta já estiver ocupada, escolha outra ao iniciar:
+
+```bash
+REDIS_PORT=6380 docker compose up -d --wait redis
+```
+
+Nesse caso, a connection string será `127.0.0.1:6380`.
+
+Para consultar logs e parar o serviço preservando os dados:
+
+```bash
+docker compose logs -f redis
+docker compose down
+```
+
+O volume `redis-data` é mantido ao parar ou recriar o container. O comando
+`docker compose down -v` também remove o volume e apaga os dados locais.
+
 ## SDK local
 
 O SDK .NET 10.0.403 para Linux x64 foi instalado em `.dotnet/` na raiz do projeto, usando os [binários oficiais da Microsoft](https://learn.microsoft.com/en-us/dotnet/core/install/linux-scripted-manual).
