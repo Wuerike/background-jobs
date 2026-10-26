@@ -1,0 +1,6 @@
+.dotnet/
+/build/
+**/bin/
+**/obj/
+.vs/
+.idea/
