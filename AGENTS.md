@@ -1,0 +1,45 @@
+# Orientações para trabalhar no BackgroundJobs
+
+Estas instruções se aplicam a todo o repositório.
+
+## Documentos de referência
+
+| Arquivo | Responsabilidade | Regra de manutenção |
+| --- | --- | --- |
+| [docs/spec-base.md](docs/spec-base.md) | Requisitos funcionais, escopo e critérios de aceite. | Imutável. Não editar, reformatar ou alterar requisitos. |
+| [docs/arquitetura.md](docs/arquitetura.md) | Solução técnica, responsabilidades e decisões arquiteturais. | Evoluir conforme necessário, respeitando a spec e as necessidades concretas da implementação. |
+| [docs/plano-desenvolvimento.md](docs/plano-desenvolvimento.md) | Planejamento macro, metodologia, status, objetivos e dependências das etapas. | Atualizar quando houver progresso de uma etapa ou mudanças de direção, escopo, dependências ou metodologia. |
+| `.development/` | Refinamentos, ações e materiais temporários de execução de cada etapa. | Criar quantos arquivos forem necessários e limpar os materiais da etapa ao concluí-la. Diretório ignorado pelo Git. |
+| [README.md](README.md) | Instalação, execução e uso do que está disponível. | Manter coerente com o código e os comandos de execução vigentes. |
+
+Antes de implementar, consultar a spec, a arquitetura e a etapa atual do plano. Distinguir funcionalidades implementadas de trabalho planejado. Dúvidas ou incompatibilidades com a spec devem ficar explícitas no documento pertinente, sem modificar a spec para acomodar a implementação.
+
+## Estilo e atualização da documentação
+
+- Documentar apenas o estado atual: decisões vigentes, comportamento disponível, trabalho planejado e pendências atuais.
+- Atualizar diretamente as seções afetadas. Remover informações que deixaram de se aplicar e manter os documentos coerentes entre si.
+- Não usar estilo de changelog, deltas, entradas cronológicas, comparações de antes/depois ou referências a estados anteriores da documentação ou da implementação.
+- Explicar a justificativa da solução vigente quando isso ajudar a entendê-la, sem narrar alternativas abandonadas ou o histórico de alterações.
+- Manter evidências e informações do estudo exigidas pela spec como síntese atual e referências aos artefatos pertinentes, sem transformá-las em changelog.
+- A regra de documentação não elimina os históricos de jobs e tentativas exigidos pelo domínio.
+
+## Refinamento e execução das etapas
+
+- Manter o plano de desenvolvimento no nível macro. Refinar ações, checklists, investigações e validações da etapa em `.development/`.
+- Criar quantos arquivos forem úteis e organizar por etapa conforme necessário, com estrutura proporcional ao trabalho.
+- Consultar os materiais existentes em `.development/` ao retomar uma etapa. Mantê-los suficientes para identificar o objetivo, as ações pendentes, os bloqueios e o próximo passo.
+- Tratar os refinamentos como apoio temporário à execução. A spec define os requisitos; código e testes representam o comportamento implementado e sua verificação.
+- Atualizar a documentação permanente apenas com informações duradouras pertinentes: decisões na arquitetura, instruções no README e situação ou mudanças macro no plano.
+- Ao concluir uma etapa, preservar código, testes, pendências relevantes e evidências ou informações do estudo exigidas pela spec antes de limpar seus materiais temporários.
+- Limpar apenas os materiais da etapa concluída, preservando arquivos de outros trabalhos ou ainda necessários. Os refinamentos não precisam ser versionados ou arquivados após a conclusão.
+- Aplicar também aos refinamentos textuais a regra de documentar o estado atual, sem changelog ou diário de alterações.
+
+## Simplicidade de código
+
+- Priorizar a solução mais simples que atenda aos requisitos e preserve a correção.
+- Implementar o necessário para a entrega atual, respeitando as dependências do plano.
+- Preferir código direto, nomes claros, funções coesas e responsabilidades explícitas.
+- Criar abstrações, camadas e generalizações quando resolverem uma necessidade concreta; evitar estruturas para possibilidades futuras.
+- Aproveitar as convenções e dependências existentes antes de introduzir novas ferramentas ou bibliotecas.
+- Validar os comportamentos relevantes com testes proporcionais à mudança, incluindo persistência e concorrência quando afetadas.
+- Manter as garantias exigidas de atomicidade, persistência e consistência ao simplificar a implementação.
