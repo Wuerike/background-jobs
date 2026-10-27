@@ -1,10 +1,10 @@
-# Arquitetura proposta para o BackgroundJobs
+# Arquitetura do BackgroundJobs
 
 ## 1. Status e referências
 
-Este documento registra a proposta de arquitetura baseada na [especificação funcional](spec-base.md).
+Este documento registra a arquitetura baseada na [especificação funcional](spec-base.md), distinguindo o código disponível dos componentes planejados.
 
-A proposta preserva as escolhas já presentes no repositório: .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Os componentes, contratos e exemplos descritos aqui são propostas de implementação; sua documentação não representa funcionalidades já implementadas.
+A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados o registro de contratos e handlers, os modelos públicos e a preparação interna com serialização, validação e relógio injetável. A demo cadastra o contrato `log-message`. A criação e a consulta integradas ao Redis, HTTP e motor permanecem planejados.
 
 A entrega prevista é uma biblioteca com motor próprio de processamento e uma aplicação demonstrativa. A biblioteca executa as funções dentro do processo da aplicação consumidora; Redis é o serviço externo de armazenamento.
 
@@ -90,7 +90,9 @@ A demo valida os parâmetros específicos das suas funções no contrato HTTP. O
 | --- | --- |
 | `IJobClient` | Enfileirar ou agendar e devolver o ID somente após persistir. |
 | `IJobManager` | Consultar, listar, deletar e reenfileirar. |
-| `JobRegistry` | Associar identificadores de contratos a handlers, tipos de argumentos, desserialização e validação. |
+| `JobRegistry` | Compor os catálogos compartilhados `Contracts` e `Handlers`, com registro conjunto sem acréscimos parciais em caso de configuração inválida. |
+| `JobContracts` | Associar nomes estáveis a tipos de argumentos, serialização, desserialização e validação opcional. Não exige handler. |
+| `JobHandlers` | Associar contratos conhecidos a handlers com o mesmo tipo de argumentos. |
 | `JobContext` | Fornecer `JobId` e `Attempt`, começando em 1. |
 | `JobServer` | Coordenar inicialização, recuperação, processamento e parada. |
 | `Scheduler` | Promover jobs elegíveis de `scheduled` para `enqueued`. |
@@ -106,24 +108,20 @@ Quando um handler precisar de dependências com escopo, a biblioteca cria um esc
 
 ### 4.1 Exemplo de uso sem HTTP
 
-O exemplo é ilustrativo: nomes e assinaturas ainda não estão implementados. A função `SendEmailAsync` e o tipo `SendEmailArgs` pertencem à aplicação consumidora.
+O cadastro está disponível e não invoca os delegates. A função `SendEmailAsync` e o tipo `SendEmailArgs` pertencem à aplicação consumidora. A chamada de criação mostra o contrato público declarado; sua implementação integrada ao armazenamento pertence à E1.2.
 
 ```csharp
-services.AddBackgroundJobs(options =>
-{
-    options.WorkerCount = 4;
-    options.RedisConnection = "127.0.0.1:6379";
-});
-
-services.AddBackgroundJob<SendEmailArgs>(
-    "send-email.v1",
+var sendEmail = new JobDefinition<SendEmailArgs>("send-email.v1");
+var registry = new JobRegistry();
+registry.Register(
+    sendEmail,
     async (args, context) =>
     {
         await SendEmailAsync(args);
     });
 
 var jobId = await client.EnqueueAsync(
-    "send-email.v1",
+    sendEmail,
     new SendEmailArgs("pessoa@example.com"),
     new JobOptions
     {
@@ -133,6 +131,18 @@ var jobId = await client.EnqueueAsync(
 ```
 
 O identificador representa um contrato estável de argumentos e comportamento. Mudanças incompatíveis exigem um novo identificador e a preservação do contrato anterior enquanto houver jobs que o referenciem. O sufixo `.v1` é uma convenção de escrita; a biblioteca não precisa interpretar versões nem impor esse formato. Os nomes obrigatórios da demo permanecem exatamente os definidos na spec.
+
+`JobDefinition<TArgs>` é uma referência imutável com nome obrigatório, comparado ordinalmente e sem normalização. O cadastro rejeita duplicidades, nomes desconhecidos e tipos incompatíveis com `InvalidOperationException`; argumentos inválidos da configuração usam `ArgumentException` ou `ArgumentNullException`. `Contracts.Add(job, validate)` cadastra somente o contrato; `Handlers.Register(job, handler)` adiciona a implementação de um contrato conhecido. `Register` exige contrato novo e handler não nulo, verificando as precondições antes de acrescentar ambos. A configuração é sequencial, antes do uso do registro.
+
+As interfaces públicas declaram criação exclusivamente tipada e consulta somente por ID:
+
+```csharp
+Task<string> IJobClient.EnqueueAsync<TArgs>(
+    JobDefinition<TArgs> job, TArgs args, JobOptions? options = null);
+Task<JobDetails?> IJobManager.GetAsync(string jobId);
+```
+
+A consulta não exige contrato ou handler e usa `Args: JsonElement`. Ausência é `null`; falhas de leitura são erros. As implementações persistentes dessas interfaces estão planejadas para E1.2.
 
 ### 4.2 Descritor persistido e interface com o storage
 
@@ -150,6 +160,12 @@ Uma representação lógica do pedido é:
 ```
 
 No Redis, os argumentos podem ocupar um campo do hash como string JSON. O storage trata esse conteúdo como dados opacos e não precisa conhecer o tipo C# dos argumentos.
+
+A preparação interna disponível resolve o contrato pelo nome e tipo exato, serializa os argumentos, reconstrói `TArgs`, invoca o validador opcional e serializa a representação validada. O descritor contém somente nome e JSON independente dos objetos do chamador. A política controlada e imutável de `System.Text.Json` usa `camelCase` sensível a maiúsculas, rejeita campos desconhecidos e duplicidades inclusive aninhadas e não converte strings, frações ou notação decimal/exponencial em inteiros. Parâmetros obrigatórios de construtor são exigidos; parâmetros opcionais mantêm os padrões do contrato. Restrições de valores nulos são definidas pelo contrato e pelo validador.
+
+O conteúdo Unicode bem formado é preservado sem normalização. Um conversor interno de strings rejeita UTF-16 com surrogates sem par usando `JobValidationException`, antes que a escrita JSON possa substituir o conteúdo. A regra vale para strings, valores aninhados e chaves de dicionários nas duas serializações da preparação, incluindo texto introduzido pelo validador. Para os dicionários de `[JsonExtensionData]` com valores `JsonElement` ou `object`, o resolvedor de metadados aplica a mesma checagem às chaves ao obter a propriedade para serialização. Essa escrita de nomes não usa o conversor de strings; a verificação no getter evita a substituição antes de produzir JSON, inclusive em objetos aninhados, sem percorrer o grafo de argumentos separadamente. `JobJsonNodeConverter` aplica a mesma verificação aos nomes e valores textuais da subárvore de `JsonNode` antes de delegar a escrita ao DOM nativo, pois `JsonObject`, `JsonArray` e `JsonValue` não usam o conversor de strings nessa escrita. A verificação respeita o limite de profundidade JSON e ocorre nas duas serializações, inclusive para nós presentes em dicionários ou introduzidos pelo validador. A leitura delega ao conversor nativo e exige uma forma compatível com o tipo declarado. Valores nulos continuam sujeitos ao contrato. JSON embutido em `JsonElement` segue as verificações nativas do serializador, que rejeitam escapes de surrogates sem par com `JsonException`. Não há captura em torno do validador que reclassifique suas exceções.
+
+`JobOptions` é imutável após inicialização: `MaxAttempts` tem padrão 3 e faixa 1–10; `RetryDelayMs`, padrão 1000 e faixa 0–60000; `RunAt` é `DateTimeOffset?`. Opções nulas na API C# equivalem aos padrões. Após validar, uma única leitura de `TimeProvider` define `createdAt`, `updatedAt`, histórico inicial e comparação temporal. Horário futuro produz `scheduled` e `scheduledAt` UTC, preservando ticks; ausência, passado ou igualdade produzem `enqueued` e `scheduledAt = null`. O pedido preparado tem zero tentativas e histórico de tentativas vazio. Os valores efetivos, ID e dados preparados devem ser preservados nas retransmissões internas da persistência da E1.2.
 
 A interface interna segue as operações do processamento. Assinaturas conceituais:
 
@@ -206,6 +222,10 @@ O handler de `v1` pode adaptar os argumentos para a implementação atual. Se `v
 
 ### 4.4 Validação, manutenção e migração
 
+O delegate opcional de validação usa `Action<TArgs>`. Retorno normal aceita os argumentos; `JobValidationException`, pública e derivada diretamente de `Exception`, expressa rejeição esperada com mensagem legível. Valores inválidos das opções usam essa mesma exceção. Exceções inesperadas do validador, inclusive `ArgumentException`, `JsonException` e `NullReferenceException`, propagam como a mesma instância com mensagem e stack trace preservados. Não há captura genérica envolvendo desserialização e validação que as converta em entrada inválida. Falhas de configuração e infraestrutura mantêm sua classificação própria.
+
+A demo define `LogMessageArgs(string Message)` e fornece seu validador: mensagem obrigatória, até 200 unidades UTF-16 (`string.Length`), string vazia permitida e conteúdo preservado sem trim ou normalização. A política do serializador exige a presença de `message` e seu tipo textual; o validador rejeita nulos e excesso de comprimento.
+
 Aplicar validação em dois momentos:
 
 1. **Criação:** verificar nome, compatibilidade do tipo/JSON, campos obrigatórios e regras dos argumentos antes de aceitar e persistir o pedido. Entrada HTTP inválida continua retornando `400`.
@@ -241,6 +261,8 @@ O modelo público acompanha a spec:
 | `attemptHistory` | Tentativas em ordem cronológica. |
 
 As datas expostas pela API usam ISO-8601 UTC.
+
+O modelo público disponível é `JobDetails`, com propriedades somente de leitura, argumentos clonados com vida útil independente e cópias não modificáveis dos históricos. `JobState` contém os seis estados; `JobStateChange` contém estado, momento UTC e motivo. `JobAttempt` contém número, início e fim UTC, resultado opcional (`JobAttemptOutcome`) e erro opcional; fim e resultado nulos representam tentativa aberta. A leitura consistente desses dados no Redis pertence à E1.2.
 
 ### 5.2 Históricos e metadados internos
 

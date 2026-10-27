@@ -1,12 +1,31 @@
 # BackgroundJobs
 
-Estrutura inicial em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
+Biblioteca em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 
-- `BackgroundJobs.slnx`: solução com os dois projetos.
-- `src/BackgroundJobs`: biblioteca de classes, ainda vazia.
-- `src/BackgroundJobs.Demo`: aplicação ASP.NET Core com estrutura para Minimal APIs e referência à biblioteca.
+- `BackgroundJobs.slnx`: solução com biblioteca, demo e testes unitários.
+- `src/BackgroundJobs`: registro tipado de contratos e handlers, opções, preparação interna dos pedidos e contratos públicos de criação e consulta.
+- `src/BackgroundJobs.Demo`: aplicação ASP.NET Core que cadastra o contrato `log-message` e seu validador.
+- `tests/BackgroundJobs.UnitTests`: validação do registro, JSON, argumentos, opções, relógio e modelos de leitura, sem Redis.
 
-Não há implementação de jobs, processamento, persistência ou endpoints nesta etapa.
+A E1.1 está implementada. Persistência e operações de criação/consulta integradas ao Redis pertencem à E1.2; endpoints, à E1.3. Processamento, agendamento ativo, retry e demais operações permanecem planejados. `IJobClient` e `IJobManager` declaram os contratos, ainda sem implementação de armazenamento.
+
+## Registro de contratos
+
+O registro é configurado antes de usar a biblioteca e permanece estável durante o processamento. Um produtor precisa somente do contrato e de sua validação:
+
+```csharp
+using BackgroundJobs;
+using BackgroundJobs.Demo.Jobs;
+
+var registry = new JobRegistry();
+registry.Contracts.Add(DemoJobs.LogMessage, DemoJobValidation.ValidateLogMessage);
+```
+
+A demo fornece `LogMessageArgs(string Message)`. A mensagem é obrigatória e aceita até 200 unidades UTF-16 (`string.Length`), incluindo string vazia; espaços e conteúdo Unicode bem formado são preservados. A biblioteca rejeita strings com surrogates sem par usando `JobValidationException`, inclusive em valores aninhados, chaves de dicionários e nomes e valores textuais de `JsonNode` (`JsonObject`, `JsonArray` e `JsonValue`), também nos dicionários de dados de extensão com `[JsonExtensionData]`, antes de escrever o texto no JSON. Os argumentos e validadores de outros jobs pertencem à aplicação consumidora.
+
+Para associar uma implementação a um contrato conhecido, use `registry.Handlers.Register(job, handler)`. Para adicionar contrato novo e handler juntos, use `registry.Register(job, handler, validate)`. O handler tem assinatura `Func<TArgs, JobContext, Task>`; cadastro e preparação não o executam. Nomes são sensíveis a maiúsculas e cadastros duplicados são rejeitados.
+
+O validador opcional é um `Action<TArgs>`: retorno normal aceita os argumentos; `JobValidationException` declara rejeição com mensagem legível. Outras exceções propagam sem conversão. As opções aceitam `MaxAttempts` de 1 a 10 (padrão 3), `RetryDelayMs` de 0 a 60000 (padrão 1000) e `RunAt` opcional. A preparação interna reconstrói e valida os argumentos, produz JSON independente dos objetos do chamador e usa uma leitura de `TimeProvider` para determinar estado e metadados. Ela pode ser verificada pelos testes unitários.
 
 ## Redis local
 
@@ -87,4 +106,7 @@ A pasta `build/` é ignorada pelo Git.
 ```bash
 dotnet restore BackgroundJobs.slnx
 dotnet build BackgroundJobs.slnx
+dotnet test BackgroundJobs.slnx --no-build
 ```
+
+Os testes atuais não requerem Docker nem conexão com Redis.

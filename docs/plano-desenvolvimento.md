@@ -68,7 +68,7 @@ Remover apenas os materiais temporários da etapa concluída, preservando trabal
 
 | Etapa | Estado | Resultado esperado | Critério geral de conclusão | Dependências |
 | --- | --- | --- | --- | --- |
-| E1 — Criar e consultar | Planejada | Registrar uma função, validar e persistir pedidos, consultar seus dados pela biblioteca e HTTP. | ID retornado após persistência; entrada inválida rejeitada; dados e histórico inicial consultáveis. | Estrutura existente. |
+| E1 — Criar e consultar | Em andamento | Registrar uma função, validar e persistir pedidos, consultar seus dados pela biblioteca e HTTP. | ID retornado após persistência; entrada inválida rejeitada; dados e histórico inicial consultáveis. | Estrutura existente. |
 | E2 — Executar um job | Planejada | Executar jobs com um worker, contexto, tentativas e eventos da demo. | Execução imediata demonstrável, com sucesso e falha terminal de uma tentativa; falha de uma função não encerra o worker. | E1. |
 | E3 — Controlar concorrência | Planejada | Executar com quantidade configurável de workers e FIFO com um worker. | Critérios 3 e 4 da spec: ordem, exclusividade e limite de concorrência. | E2. |
 | E4 — Agendar e repetir | Planejada | Executar agendamentos e retries com elegibilidade, atraso fixo e limite de tentativas. | Critérios 2, 5 e 6 da spec, incluindo horário passado e esgotamento. | E2 e E3. |
@@ -78,6 +78,8 @@ Remover apenas os materiais temporários da etapa concluída, preservando trabal
 | E8 — Fechar a entrega | Planejada | Entregar biblioteca, demo completa, exemplo sem HTTP e documentação reproduzível. | Todos os critérios de aceite e contratos HTTP verificados; evidências e informações do estudo disponíveis. | E1 a E7. |
 
 Os critérios são resumidos; a spec e a arquitetura fornecem os requisitos completos. O refinamento de execução define os cenários concretos necessários a cada etapa.
+
+A E1.1 está concluída: registro tipado, contratos públicos, validação e preparação interna de pedidos implementados e cobertos por testes unitários. A E1 permanece em andamento; as próximas ações são a integração de criação e consulta ao Redis (E1.2) e a demonstração HTTP (E1.3), ambas planejadas.
 
 ## 4. Manutenção do plano macro
 

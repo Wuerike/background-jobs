@@ -3,4 +3,7 @@
     <Project Path="src/BackgroundJobs/BackgroundJobs.csproj" />
     <Project Path="src/BackgroundJobs.Demo/BackgroundJobs.Demo.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BackgroundJobs.UnitTests/BackgroundJobs.UnitTests.csproj" />
+  </Folder>
 </Solution>
