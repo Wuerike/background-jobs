@@ -47,6 +47,8 @@ Uma etapa está concluída quando:
 - As verificações relevantes passaram e o comportamento está representado no código e nos testes adequados.
 - Limitações e pendências atuais estão explícitas nos locais pertinentes.
 - As decisões arquiteturais e instruções de uso afetadas estão atualizadas.
+- Os artefatos permanentes descrevem comportamentos e decisões sem referências a etapas, tasks ou checklists temporários, conforme a regra de independência do planejamento no [AGENTS.md](../AGENTS.md#independência-do-planejamento). As evidências estão preservadas por requisito ou comportamento antes da remoção dos materiais da etapa.
+- Cada artefato auxiliar de validação mantido fora de `.development/` tem finalidade duradoura identificável, conforme a regra de [destino dos artefatos de validação](../AGENTS.md#destino-dos-artefatos-de-validação).
 - As pendências restantes estão resolvidas ou representadas no planejamento vigente, sem encobrir critérios não atendidos.
 
 Uma etapa concluída não representa o aceite completo do projeto. A conclusão funcional depende de todos os critérios da spec.
@@ -59,7 +61,7 @@ Antes de limpar os materiais de uma etapa:
 
 - Garantir que código e testes necessários à solução estejam nos diretórios permanentes do projeto.
 - Incorporar decisões duradouras à arquitetura e instruções de uso ao README.
-- Preservar, em artefatos duráveis, as evidências e informações do estudo exigidas pela spec.
+- Consolidar a síntese das evidências e informações do estudo exigidas pela spec nos documentos responsáveis pelo assunto, sem exigir a preservação dos arquivos temporários usados para produzi-las.
 - Representar pendências ainda relevantes no plano macro ou no refinamento da etapa responsável.
 
 Remover apenas os materiais temporários da etapa concluída, preservando trabalhos em andamento e arquivos cuja finalidade ainda seja necessária. O encerramento da etapa inclui essa limpeza; não é necessário criar um arquivo histórico de refinamentos executados.
@@ -69,7 +71,7 @@ Remover apenas os materiais temporários da etapa concluída, preservando trabal
 | Etapa | Estado | Resultado esperado | Critério geral de conclusão | Dependências |
 | --- | --- | --- | --- | --- |
 | E1 — Criar e consultar | Concluída | Registrar uma função, validar e persistir pedidos, consultar seus dados pela biblioteca e HTTP. | ID retornado após persistência; entrada inválida rejeitada; dados e histórico inicial consultáveis. | Estrutura existente. |
-| E2 — Executar um job | Planejada | Executar jobs com um worker, contexto, tentativas e eventos da demo. | Execução imediata demonstrável, com sucesso e falha terminal de uma tentativa; falha de uma função não encerra o worker. | E1. |
+| E2 — Executar um job | Concluída | Executar jobs imediatos com um worker, contexto, reserva e conclusão persistentes, eventos da demo e indicação de disponibilidade. | Critério 1 da spec; sucesso e falha terminal com `maxAttempts=1`, históricos consistentes e continuidade após erro de uma função. Falhas com orçamento restante ficam em `scheduled`, aguardando a E4. | E1 concluída. |
 | E3 — Controlar concorrência | Planejada | Executar com quantidade configurável de workers e FIFO com um worker. | Critérios 3 e 4 da spec: ordem, exclusividade e limite de concorrência. | E2. |
 | E4 — Agendar e repetir | Planejada | Executar agendamentos e retries com elegibilidade, atraso fixo e limite de tentativas. | Critérios 2, 5 e 6 da spec, incluindo horário passado e esgotamento. | E2 e E3. |
 | E5 — Gerenciar o ciclo | Planejada | Listar, deletar pendentes e reenfileirar finalizados, preservando históricos. | Critério 7 da spec, incluindo conflitos e consistência das operações concorrentes. | E4. |
@@ -79,7 +81,11 @@ Remover apenas os materiais temporários da etapa concluída, preservando trabal
 
 Os critérios são resumidos; a spec e a arquitetura fornecem os requisitos completos. O refinamento de execução define os cenários concretos necessários a cada etapa.
 
-A E1 está concluída: registro tipado, validação, criação persistente e consulta no Redis, além de criação e detalhe por HTTP na demo, estão implementados e cobertos por testes unitários, de integração e HTTP. A síntese das evidências e dos limites está na seção [Validar do README](../README.md#validar). A próxima etapa é E2 — Executar um job, que deve ser refinada em `.development/` antes da implementação. Execução de handlers e demais comportamentos do motor permanecem planejados.
+A E1 está concluída: registro tipado, validação, criação persistente e consulta no Redis, além de criação e detalhe por HTTP na demo, estão implementados e cobertos por testes unitários, de integração e HTTP. A síntese das evidências e dos limites está na seção [Validar do README](../README.md#validar).
+
+A E2 está concluída: invocação do contrato persistido, reserva e conclusão atômicas, um worker e ciclo do servidor estão implementados pela biblioteca, com adaptador de hosting, três funções da demo, eventos e `/health`. O critério 1, falha terminal, continuidade, parada coordenada e diagnóstico de indisponibilidade estão verificados por testes unitários, Redis real e HTTP. Build sem avisos ou erros e 369 testes aprovados; a síntese das evidências e os comandos de reprodução estão no [README](../README.md#validar), e as informações do estudo estão na seção de definição de pronto deste plano. Os materiais temporários da etapa estão consolidados em código, testes e documentação permanente.
+
+As fronteiras da E2 preservam o comportamento da spec: uma falha só é terminal quando esgota `maxAttempts`; com orçamento restante, a tentativa fecha com erro e o job fica `scheduled`, com a elegibilidade calculada, sem promoção ou nova execução nesta etapa. Configuração de múltiplos workers e comprovação de FIFO pertencem à E3; promoção de agendamentos e execução dos retries, à E4. A inicialização verifica handlers e a parada básica aguarda a função ativa; recuperação após queda e validação da parada em processos separados permanecem na E6. Falhas de armazenamento devem deixar o motor indisponível, sem serem tratadas como erro da função; reconciliação e retomada após confirmações ambíguas pertencem à E7.
 
 ## 4. Manutenção do plano macro
 
@@ -97,4 +103,4 @@ O projeto está funcionalmente pronto quando atende aos critérios de aceite e c
 
 As informações do estudo exigidas pela spec incluem ferramentas e modelos, referências às conversas e artefatos, esforço humano aproximado, decisões, retrabalhos e tokens/custo quando disponíveis. Manter uma síntese atual e artefatos duráveis pertinentes, independentemente da limpeza de `.development/`. Identificar estimativas e informar dados não medidos.
 
-O trabalho de criação e consulta no Redis e da fronteira HTTP usa Codex, Bash, .NET SDK, xUnit, Microsoft.AspNetCore.Mvc.Testing, StackExchange.Redis, Lua e Redis real, com curl e Python na demonstração HTTP, sem delegação a outros agentes. Modelo exato, tokens, custo e tempo humano não foram medidos nessas implementações. Os artefatos duráveis são o código, as suítes de teste e a documentação do projeto; as decisões técnicas estão nas seções 5.4 e 13 da arquitetura e a síntese das evidências está no README. As conversas no Codex são a fonte das solicitações e da execução; sua exportação integral e a consolidação dos dados humanos do estudo permanecem pendências da E8.
+O trabalho de criação, consulta, execução e fronteira HTTP usa Codex, Bash, .NET SDK, xUnit, Microsoft.AspNetCore.Mvc.Testing, StackExchange.Redis, Lua e Redis real, com curl e Python nas demonstrações HTTP, sem delegação a outros agentes. O agente é identificado como GPT-6; versão exata do modelo, tokens, custo e tempo humano não foram medidos nessas implementações. A medição demonstrativa de latência usa `time.monotonic()` do Python; o aceite HTTP usa `Stopwatch`. Os artefatos duráveis são o código, os scripts Lua, as suítes de teste e a documentação do projeto; as decisões técnicas estão na arquitetura e a síntese das evidências está no [README](../README.md#validar). As conversas no Codex são a fonte das solicitações e da execução; sua exportação integral e a consolidação dos dados humanos do estudo permanecem pendências da E8.

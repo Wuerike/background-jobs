@@ -9,6 +9,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="BackgroundJobs.UnitTests" />
     <InternalsVisibleTo Include="BackgroundJobs.IntegrationTests" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
     <PackageReference Include="StackExchange.Redis" Version="2.9.32" />
     <EmbeddedResource Include="Storage/Redis/*.lua" />
   </ItemGroup>

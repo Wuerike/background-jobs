@@ -18,10 +18,15 @@ public sealed class JobHttpTests : IAsyncLifetime
     private sealed class Factory(Action<IServiceCollection> configure) : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder) =>
-            builder.UseEnvironment("Development").ConfigureServices(configure);
+            builder.UseEnvironment("Development").ConfigureServices(services =>
+            {
+                var adapters = services.Where(d => d.ImplementationType == typeof(BackgroundJobs.Hosting.JobServerHostedService)).ToArray();
+                foreach (var descriptor in adapters) services.Remove(descriptor);
+                configure(services);
+            });
     }
 
-    private readonly string prefix = "e13-" + Guid.NewGuid().ToString("N");
+    private readonly string prefix = "http-contract-" + Guid.NewGuid().ToString("N");
     private ConnectionMultiplexer connection = null!;
     private Factory factory = null!;
     private HttpClient http = null!;

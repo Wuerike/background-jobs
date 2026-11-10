@@ -1,9 +1,12 @@
+using System.Text.Json;
+
 namespace BackgroundJobs;
 
 public sealed class JobHandlers
 {
     private readonly JobContracts contracts;
     private readonly Dictionary<string, Delegate> handlers = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Func<JsonElement, JobContext, Task>> invokers = new(StringComparer.Ordinal);
 
     internal JobHandlers(JobContracts contracts) => this.contracts = contracts;
 
@@ -11,10 +14,17 @@ public sealed class JobHandlers
     {
         ArgumentNullException.ThrowIfNull(job);
         ArgumentNullException.ThrowIfNull(handler);
-        contracts.Get(job);
+        var contract = contracts.Get(job);
         EnsureNotRegistered(job.Name);
         handlers.Add(job.Name, handler);
+        invokers.Add(job.Name, (args, context) => handler(contract.DeserializeAndValidate(args), context));
     }
+
+    internal bool Contains(string name) => invokers.ContainsKey(name);
+
+    internal Task InvokeAsync(string name, JsonElement args, JobContext context) =>
+        invokers.TryGetValue(name, out var invoke) ? invoke(args, context) :
+            throw new InvalidOperationException($"O handler de '{name}' não está registrado.");
 
     internal void EnsureNotRegistered(string name)
     {

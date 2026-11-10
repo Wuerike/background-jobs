@@ -3,7 +3,7 @@ using BackgroundJobs.Demo.Jobs;
 
 namespace BackgroundJobs.Demo.Endpoints;
 
-internal sealed record CreateJobRequest(LogMessageArgs Args, JobOptions Options)
+internal sealed record CreateJobRequest(object Args, JobOptions Options)
 {
     // Inspect the original JSON before mapping: deserialization would hide duplicate
     // properties and collapse absent fields and explicit null into the same value.
@@ -14,11 +14,14 @@ internal sealed record CreateJobRequest(LogMessageArgs Args, JobOptions Options)
             using var document = await JsonDocument.ParseAsync(request.Body, cancellationToken: request.HttpContext.RequestAborted);
             var root = Object(document.RootElement, "pedido", "job", "params", "options");
             var name = Text(Required(root, "job"), "job");
-            if (name != DemoJobs.LogMessage.Name)
-                throw new JobValidationException("job desconhecido.");
-
-            var args = Object(Required(root, "params"), "params", "message");
-            var message = Text(Required(args, "message"), "message");
+            var parameters = Required(root, "params");
+            object args = name switch
+            {
+                "log-message" => new LogMessageArgs(Text(Required(Object(parameters, "params", "message"), "message"), "message")),
+                "succeed-after" => new SucceedAfterArgs(Integer(Required(Object(parameters, "params", "delayMs"), "delayMs"), "delayMs")),
+                "fail-n-times" => new FailNTimesArgs(Integer(Required(Object(parameters, "params", "failTimes"), "failTimes"), "failTimes")),
+                _ => throw new JobValidationException("job desconhecido.")
+            };
             var options = new JobOptions();
             if (root.TryGetProperty("options", out var value))
             {
@@ -30,7 +33,7 @@ internal sealed record CreateJobRequest(LogMessageArgs Args, JobOptions Options)
                 if (obj.TryGetProperty("runAt", out value))
                     options = options with { RunAt = Instant(value) };
             }
-            return new(new LogMessageArgs(message), options);
+            return new(args, options);
         }
         // These catches surround parsing only. Exceptions from library validators
         // must retain their classification as unexpected failures at the HTTP boundary.

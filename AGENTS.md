@@ -23,6 +23,24 @@ Antes de implementar, consultar a spec, a arquitetura e a etapa atual do plano. 
 - Manter evidências e informações do estudo exigidas pela spec como síntese atual e referências aos artefatos pertinentes, sem transformá-las em changelog.
 - A regra de documentação não elimina os históricos de jobs e tentativas exigidos pelo domínio.
 
+### Independência do planejamento
+
+- A spec define os requisitos. Código e testes representam o comportamento implementado e sua verificação. Documentação permanente descreve esse comportamento, suas garantias, limitações e decisões vigentes.
+- Identificadores de etapas, tasks e checklists de execução ficam restritos a `docs/plano-desenvolvimento.md` e aos materiais temporários ativos em `.development/`.
+- README, documentação técnica, código, comentários, nomes de testes, mensagens de erro e exemplos devem usar termos do domínio e referências a componentes ou comportamentos, sem vinculação a identificadores do planejamento, inclusive de trabalho futuro.
+- Durante a implementação, atualizar diretamente a documentação afetada com base no código. Não aguardar o encerramento da etapa para retirar referências ao refinamento.
+- Ao consolidar uma decisão ou evidência, preservar seu conteúdo útil e sua justificativa, sem transportar a identificação da task, a narrativa da execução ou dependências dos materiais temporários.
+- Descrever pendências pelo comportamento ainda indisponível. Sua distribuição entre etapas e tasks pertence ao plano.
+- Referências a requisitos e critérios da spec continuam permitidas, pois pertencem ao contrato permanente do projeto.
+
+### Destino dos artefatos de validação
+
+- Scripts exploratórios, roteiros, matrizes, checklists e relatórios produzidos para apoiar a execução ficam em `.development/`.
+- Verificações necessárias à regressão integram as suítes de testes existentes.
+- Instruções reproduzíveis, limitações e sínteses de evidências ficam nos documentos permanentes responsáveis pelo assunto, evitando duplicação.
+- Um script ou documento auxiliar permanente precisa atender a um uso recorrente concreto, com responsabilidade própria e manutenção definida. A possibilidade de reutilização futura é insuficiente.
+- Preservar evidências não exige preservar os arquivos usados para produzi-las. Ao concluir o trabalho, consolidar o conteúdo necessário e remover os materiais temporários, sem promover automaticamente refinamentos a documentação permanente.
+
 ## Refinamento e execução das etapas
 
 - Manter o plano de desenvolvimento no nível macro. Refinar ações, checklists, investigações e validações da etapa em `.development/`.

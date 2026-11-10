@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using BackgroundJobs;
+using BackgroundJobs.Hosting;
+using BackgroundJobs.Demo.Events;
 using BackgroundJobs.Demo.Endpoints;
 using BackgroundJobs.Demo.Jobs;
 using StackExchange.Redis;
@@ -13,13 +15,20 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 var jobs = new JobRegistry();
-jobs.Contracts.Add(DemoJobs.LogMessage, DemoJobValidation.ValidateLogMessage);
+var events = new DemoEvents();
+new DemoJobHandlers(events).Register(jobs);
+builder.Services.AddSingleton(events);
 builder.Services.AddSingleton(jobs);
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
     ConnectionMultiplexer.Connect(builder.Configuration["REDIS_CONNECTION"] ?? "127.0.0.1:6379"));
 builder.Services.AddSingleton<IJobClient>(services => new RedisJobClient(
     services.GetRequiredService<JobRegistry>().Contracts, services.GetRequiredService<IConnectionMultiplexer>()));
 builder.Services.AddSingleton<IJobManager>(services => new RedisJobManager(services.GetRequiredService<IConnectionMultiplexer>()));
+
+builder.Services.AddSingleton(services => new JobServer(
+    services.GetRequiredService<JobRegistry>(), services.GetRequiredService<IConnectionMultiplexer>()));
+builder.Services.AddHostedService<JobServerHostedService>();
+builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = Timeout.InfiniteTimeSpan);
 
 var app = builder.Build();
 // Keep unexpected failures generic even in Development. Details stay in server logs.

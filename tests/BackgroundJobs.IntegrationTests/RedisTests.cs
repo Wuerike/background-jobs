@@ -12,7 +12,7 @@ public sealed class RedisTests : IAsyncLifetime
     private sealed class Clock : TimeProvider { public override DateTimeOffset GetUtcNow() => Now; }
     public sealed class Payload { public string Message { get; set; } = ""; public List<string> Values { get; set; } = []; }
     public sealed class CyclicArgs { public CyclicArgs? Next { get; set; } }
-    private readonly string prefix = "e12-" + Guid.NewGuid().ToString("N");
+    private readonly string prefix = "redis-store-" + Guid.NewGuid().ToString("N");
     private readonly JobDefinition<Payload> definition = new("message.v1");
     private readonly JobContracts contracts = new();
     private ConnectionMultiplexer connection = null!;
