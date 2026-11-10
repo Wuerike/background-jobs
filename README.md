@@ -198,4 +198,8 @@ REDIS_CONNECTION=127.0.0.1:6380 dotnet test tests/BackgroundJobs.HttpTests --no-
 
 `REDIS_CONNECTION` usa `127.0.0.1:6379` por padrão e deve corresponder à porta escolhida em `REDIS_PORT` no Compose. Cada teste usa prefixo exclusivo e limpa somente suas chaves, sem `FLUSHDB` ou mudanças na configuração do servidor. Um Redis externo equivalente também pode ser usado.
 
-A cobertura e os limites da entrega estão em [validação da E1](docs/validacao-e1.md) e [validação do armazenamento](docs/validacao-e1.2.md).
+A cobertura está nos [testes unitários](tests/BackgroundJobs.UnitTests), nos [testes de integração](tests/BackgroundJobs.IntegrationTests/RedisTests.cs) e nos [testes HTTP](tests/BackgroundJobs.HttpTests/JobHttpTests.cs): preparação e validação dos pedidos, criação atômica, leitura consistente, concorrência entre criação e consulta, retransmissões equivalentes, corrupção e falhas do armazenamento, além dos contratos de criação e detalhe HTTP.
+
+O resultado documentado para a E1 é build sem avisos ou erros e 257 testes aprovados (118 unitários, 53 de integração e 86 HTTP), sem falhas ou testes ignorados, com SDK 10.0.114 e Redis 8.2.10 dedicado na porta 16379, AOF, `appendfsync always` e `noeviction`. Nesse ambiente WSL, sem Docker disponível, Redis usa a distribuição oficial compilada em `/tmp`, com Zig 0.14.1 e runtime libgcc 13.3. A demonstração HTTP com os comandos deste README confirma criação e consulta de pedidos imediatos e futuros, com argumentos, opções e histórico inicial preservados e sem tentativas.
+
+A leitura por nova conexão não comprova recuperação após queda. Os snapshots de estados e tentativas usados nos testes não demonstram execução do motor. Persistência após encerramento abrupto, recuperação, parada e `DATA_DIR` dependem da E6; confirmações ambíguas e falhas no meio das operações, da E7. A criação reconhece retransmissões equivalentes no armazenamento, mas não há loop próprio de retry ou reconciliação de rede.

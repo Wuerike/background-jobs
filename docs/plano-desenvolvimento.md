@@ -79,7 +79,7 @@ Remover apenas os materiais temporários da etapa concluída, preservando trabal
 
 Os critérios são resumidos; a spec e a arquitetura fornecem os requisitos completos. O refinamento de execução define os cenários concretos necessários a cada etapa.
 
-A E1 está concluída: registro tipado, validação, criação persistente e consulta no Redis, além de criação e detalhe por HTTP na demo, estão implementados e cobertos por testes unitários, de integração e HTTP. Evidências e limites: [validação da E1](validacao-e1.md) e [validação do armazenamento](validacao-e1.2.md). A próxima etapa é E2 — Executar um job, que deve ser refinada em `.development/` antes da implementação. Execução de handlers e demais comportamentos do motor permanecem planejados.
+A E1 está concluída: registro tipado, validação, criação persistente e consulta no Redis, além de criação e detalhe por HTTP na demo, estão implementados e cobertos por testes unitários, de integração e HTTP. A síntese das evidências e dos limites está na seção [Validar do README](../README.md#validar). A próxima etapa é E2 — Executar um job, que deve ser refinada em `.development/` antes da implementação. Execução de handlers e demais comportamentos do motor permanecem planejados.
 
 ## 4. Manutenção do plano macro
 
@@ -96,3 +96,5 @@ Não definir estimativas fechadas para todo o projeto sem evidências do ritmo d
 O projeto está funcionalmente pronto quando atende aos critérios de aceite e contratos da spec. A entrega inclui biblioteca, demo, exemplo de uso sem HTTP, instruções reproduzíveis de instalação, execução, teste e reinício, além de evidências e limitações explícitas.
 
 As informações do estudo exigidas pela spec incluem ferramentas e modelos, referências às conversas e artefatos, esforço humano aproximado, decisões, retrabalhos e tokens/custo quando disponíveis. Manter uma síntese atual e artefatos duráveis pertinentes, independentemente da limpeza de `.development/`. Identificar estimativas e informar dados não medidos.
+
+O trabalho de criação e consulta no Redis e da fronteira HTTP usa Codex, Bash, .NET SDK, xUnit, Microsoft.AspNetCore.Mvc.Testing, StackExchange.Redis, Lua e Redis real, com curl e Python na demonstração HTTP, sem delegação a outros agentes. Modelo exato, tokens, custo e tempo humano não foram medidos nessas implementações. Os artefatos duráveis são o código, as suítes de teste e a documentação do projeto; as decisões técnicas estão nas seções 5.4 e 13 da arquitetura e a síntese das evidências está no README. As conversas no Codex são a fonte das solicitações e da execução; sua exportação integral e a consolidação dos dados humanos do estudo permanecem pendências da E8.
