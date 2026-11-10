@@ -2,12 +2,13 @@
 
 Biblioteca em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 
-- `BackgroundJobs.slnx`: solução com biblioteca, demo e testes unitários.
-- `src/BackgroundJobs`: registro tipado de contratos e handlers, opções, preparação interna dos pedidos e contratos públicos de criação e consulta.
+- `BackgroundJobs.slnx`: solução com biblioteca, demo, testes unitários e de integração.
+- `src/BackgroundJobs`: registro tipado, validação, criação persistente e consulta de detalhe no Redis.
 - `src/BackgroundJobs.Demo`: aplicação ASP.NET Core que cadastra o contrato `log-message` e seu validador.
-- `tests/BackgroundJobs.UnitTests`: validação do registro, JSON, argumentos, opções, relógio e modelos de leitura, sem Redis.
+- `tests/BackgroundJobs.UnitTests`: registro, preparação, modelos e orquestração, sem Redis.
+- `tests/BackgroundJobs.IntegrationTests`: criação atômica, consulta consistente, índices e concorrência com Redis real.
 
-A E1.1 está implementada. Persistência e operações de criação/consulta integradas ao Redis pertencem à E1.2; endpoints, à E1.3. Processamento, agendamento ativo, retry e demais operações permanecem planejados. `IJobClient` e `IJobManager` declaram os contratos, ainda sem implementação de armazenamento.
+A E1.2 disponibiliza `RedisJobClient` e `RedisJobManager` para criar e consultar jobs pela biblioteca. Endpoints pertencem à E1.3. Execução, promoção de agendamentos, retry e demais operações permanecem planejados; os pedidos criados ficam pendentes no armazenamento.
 
 ## Registro de contratos
 
@@ -27,6 +28,37 @@ Para associar uma implementação a um contrato conhecido, use `registry.Handler
 
 O validador opcional é um `Action<TArgs>`: retorno normal aceita os argumentos; `JobValidationException` declara rejeição com mensagem legível. Outras exceções propagam sem conversão. As opções aceitam `MaxAttempts` de 1 a 10 (padrão 3), `RetryDelayMs` de 0 a 60000 (padrão 1000) e `RunAt` opcional. A preparação interna reconstrói e valida os argumentos, produz JSON independente dos objetos do chamador e usa uma leitura de `TimeProvider` para determinar estado e metadados. Ela pode ser verificada pelos testes unitários.
 
+## Criar e consultar sem HTTP
+
+Com Redis iniciado, uma aplicação consumidora pode usar as interfaces públicas:
+
+```csharp
+using BackgroundJobs;
+using BackgroundJobs.Demo.Jobs;
+using StackExchange.Redis;
+
+var registry = new JobRegistry();
+registry.Contracts.Add(DemoJobs.LogMessage, DemoJobValidation.ValidateLogMessage);
+registry.Handlers.Register(DemoJobs.LogMessage, (args, context) =>
+{
+    Console.WriteLine(args.Message);
+    return Task.CompletedTask;
+});
+
+using var connection = await ConnectionMultiplexer.ConnectAsync("127.0.0.1:6379");
+IJobClient client = new RedisJobClient(registry.Contracts, connection);
+IJobManager manager = new RedisJobManager(connection);
+var id = await client.EnqueueAsync(DemoJobs.LogMessage, new LogMessageArgs("Olá"));
+var detail = await manager.GetAsync(id);
+Console.WriteLine($"{detail!.Id}: {detail.State}"); // Enqueued; handler ainda não executado
+```
+
+O exemplo usa o contrato da demo, mas o consumidor pode definir seus próprios tipos e validadores. O cadastro de handler é opcional para criar e consultar. `GetAsync` não recebe registro e devolve `null` exclusivamente para ID inexistente; erros Redis e dados inválidos propagam como falhas.
+
+A conexão é criada, compartilhada e descartada pelo chamador; os serviços não a descartam nem abrem uma conexão por pedido. Os dois construtores aceitam `prefix`, com padrão `background-jobs`. Use o mesmo prefixo para os serviços do mesmo armazenamento e prefixos diferentes para isolamento. São aceitas apenas letras ASCII, dígitos, ponto, hífen e sublinhado, sem valor vazio. O cliente também aceita `timeProvider`, com padrão `TimeProvider.System`.
+
+O ID retorna somente após confirmação da criação. A escrita inclui dados, histórico e índices na mesma operação. Jobs futuros ficam `Scheduled`, com data exata preservada; não há motor para promovê-los nesta entrega. Não há loop próprio de retry/reconciliação de falhas de rede; uma falha de confirmação não deve ser interpretada como prova de ausência do pedido. Chamadas públicas independentes geram IDs distintos.
+
 ## Redis local
 
 O storage escolhido para os jobs é Redis. O `compose.yaml` usa a imagem oficial
@@ -44,8 +76,7 @@ docker compose exec redis redis-cli ping
 
 O segundo comando deve retornar `PONG`. O serviço fica disponível apenas em
 `127.0.0.1:6379`, sem senha, para desenvolvimento local. A aplicação .NET executada
-no host deverá usar a connection string `127.0.0.1:6379`. A integração da aplicação
-com Redis ainda será implementada.
+no host deverá usar a connection string `127.0.0.1:6379`. A demo ainda não compõe os serviços Redis nem expõe endpoints; o uso direto da biblioteca está disponível.
 
 Se a porta já estiver ocupada, escolha outra ao iniciar:
 
@@ -109,4 +140,16 @@ dotnet build BackgroundJobs.slnx
 dotnet test BackgroundJobs.slnx --no-build
 ```
 
-Os testes atuais não requerem Docker nem conexão com Redis.
+A suíte completa exige Redis real disponível; inicie-o com `docker compose up -d --wait redis`. A integração falha explicitamente se não conseguir conectar, sem ignorar testes.
+
+```bash
+# Somente unitários, sem Redis
+dotnet test tests/BackgroundJobs.UnitTests --no-build
+
+# Integração com porta alternativa
+REDIS_CONNECTION=127.0.0.1:6380 dotnet test tests/BackgroundJobs.IntegrationTests --no-build
+```
+
+`REDIS_CONNECTION` usa `127.0.0.1:6379` por padrão e deve corresponder à porta escolhida em `REDIS_PORT` no Compose. Cada teste usa prefixo exclusivo e limpa somente suas chaves, sem `FLUSHDB` ou mudanças na configuração do servidor. Um Redis externo equivalente também pode ser usado.
+
+A cobertura e os limites da entrega estão em [docs/validacao-e1.2.md](docs/validacao-e1.2.md).

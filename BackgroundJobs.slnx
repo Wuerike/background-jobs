@@ -4,6 +4,7 @@
     <Project Path="src/BackgroundJobs.Demo/BackgroundJobs.Demo.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/BackgroundJobs.IntegrationTests/BackgroundJobs.IntegrationTests.csproj" />
     <Project Path="tests/BackgroundJobs.UnitTests/BackgroundJobs.UnitTests.csproj" />
   </Folder>
 </Solution>

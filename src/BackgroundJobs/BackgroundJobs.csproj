@@ -8,6 +8,9 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="BackgroundJobs.UnitTests" />
+    <InternalsVisibleTo Include="BackgroundJobs.IntegrationTests" />
+    <PackageReference Include="StackExchange.Redis" Version="2.9.32" />
+    <EmbeddedResource Include="Storage/Redis/*.lua" />
   </ItemGroup>
 
 </Project>

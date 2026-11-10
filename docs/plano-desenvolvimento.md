@@ -79,7 +79,7 @@ Remover apenas os materiais temporários da etapa concluída, preservando trabal
 
 Os critérios são resumidos; a spec e a arquitetura fornecem os requisitos completos. O refinamento de execução define os cenários concretos necessários a cada etapa.
 
-A E1.1 está concluída: registro tipado, contratos públicos, validação e preparação interna de pedidos implementados e cobertos por testes unitários. A E1 permanece em andamento; as próximas ações são a integração de criação e consulta ao Redis (E1.2) e a demonstração HTTP (E1.3), ambas planejadas.
+A E1.1 está concluída: registro tipado, contratos públicos, validação e preparação interna de pedidos implementados e cobertos por testes unitários. A E1.2 está concluída: criação e consulta de detalhe no Redis, com serviços públicos, operações atômicas e testes de integração. A E1 permanece em andamento; a próxima ação é a demonstração HTTP (E1.3), planejada. Evidências e limites: [validação da E1.2](validacao-e1.2.md).
 
 ## 4. Manutenção do plano macro
 
