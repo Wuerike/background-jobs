@@ -4,7 +4,7 @@
 
 Este documento registra a arquitetura baseada na [especificação funcional](spec-base.md), distinguindo o código disponível dos componentes planejados.
 
-A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados registro tipado, criação e consulta, reserva e conclusão atômicas e execução imediata com um worker. `JobServer` oferece inicialização, disponibilidade e parada; `JobServerHostedService` o integra ao host. A demo executa os três jobs da spec e expõe criação, detalhe, eventos e health. Múltiplos workers, promoção de agendamentos, execução de retries, gerenciamento e recuperação permanecem planejados.
+A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados registro tipado, criação e consulta, reserva e conclusão atômicas e execução imediata com quantidade configurável de workers, padrão 4. `JobServer` oferece inicialização, disponibilidade e parada; `JobServerHostedService` o integra ao host. A demo executa os três jobs da spec e expõe criação, detalhe, eventos e health. Promoção de agendamentos, execução de retries, gerenciamento e recuperação permanecem planejados.
 
 A entrega prevista é uma biblioteca com motor próprio de processamento e uma aplicação demonstrativa. A biblioteca executa as funções dentro do processo da aplicação consumidora; Redis é o serviço externo de armazenamento.
 
@@ -50,7 +50,7 @@ src/
   BackgroundJobs/
     Public/           # Contratos, contexto, opções e registro de funções
     Internal/         # Preparação e contratos internos do armazenamento
-    Processing/       # JobServer e loop de execução único
+    Processing/       # JobServer e loops de execução coordenados
     Storage/
       Redis/          # Persistência e scripts Lua
     Hosting/          # Integração com DI e IHostedService
@@ -104,7 +104,7 @@ Os contratos internos de armazenamento expressam operações de domínio: criaç
 
 O armazenamento persiste um descritor da chamada: identificador estável do contrato e argumentos JSON. Delegates e instâncias de serviços são registrados novamente pela aplicação a cada inicialização. Nomes desconhecidos devem resultar em erro explícito; jobs persistidos nunca são descartados por ausência de registro. A inicialização confere a disponibilidade dos handlers referenciados pelos jobs armazenados, inclusive finalizados que podem ser reenfileirados, antes de liberar o processamento.
 
-Os handlers atuais são delegates `Func<TArgs, JobContext, Task>`, configurados antes do início do motor. Resolução de serviços com escopo por tentativa depende de um consumidor concreto e não integra a API disponível.
+Os handlers atuais são delegates `Func<TArgs, JobContext, Task>`, configurados antes do início do motor. Leituras do registro estável são concorrentes. Handlers e validadores podem ser chamados simultaneamente; a aplicação deve sincronizar seu estado compartilhado, sem depender de serialização global pelo motor. Resolução de serviços com escopo por tentativa depende de um consumidor concreto e não integra a API disponível.
 
 ### 4.1 Exemplo de uso sem HTTP
 
@@ -400,13 +400,15 @@ As consultas de detalhe obtêm uma visão consistente entre estado, contador, hi
 
 ## 8. Processamento, FIFO e agendamento
 
-`JobServer` mantém um loop de execução. Ele assume um job, aguarda a função terminar, persiste o resultado e só então busca outro. O uso direto depende somente do registro e da conexão Redis, com prefixo e `TimeProvider` opcionais; a conexão pertence ao chamador. `StartAsync` compartilha uma única inicialização entre chamadas repetidas. `StopAsync` é idempotente; uma instância parada não é reiniciada, exigindo uma nova instância para outro ciclo de serviço.
+`JobServer` mantém uma tarefa coordenadora e N loops de execução, com quantidade fixa durante sua vida. Cada loop assume um job, aguarda a função terminar e confirma sua conclusão antes de buscar outro. O parâmetro público `int workerCount = 4` vem depois de `prefix` e `timeProvider`, preservando argumentos posicionais existentes. Valores menores que 1 são rejeitados antes do acesso ao armazenamento. A conexão pertence ao chamador.
 
-O loop ocioso espera 100 ms usando `TimeProvider`, com cancelamento restrito à busca de trabalho. `IsAvailable` combina o estado do servidor e a tarefa do loop; `LastError` disponibiliza o diagnóstico fatal. A configuração planejada prevê `WORKER_COUNT` loops, com padrão 4.
+As verificações iniciais acontecem uma vez. Os N loops são agendados independentemente por `Task.Run`, permitindo que o trecho síncrono de uma função não impeça a instalação dos demais. A prontidão é publicada sob a mesma barreira usada na admissão e na falha fatal, depois de instalar todos os loops, se não houver pedido de parada. `StartAsync` compartilha essa inicialização entre chamadas repetidas. `StopAsync` é idempotente; uma instância parada não é reiniciada, exigindo uma nova instância para outro ciclo de serviço.
+
+Cada worker ocioso espera 100 ms usando `TimeProvider`, com cancelamento restrito à busca de trabalho. Uma leitura sem candidato ou reserva perdedora não autoriza invocação; a perda de uma reserva leva a nova busca, sem consumir tentativa nem acrescentar atraso de retry. `IsAvailable` combina o estado do servidor e a tarefa coordenadora; `LastError` preserva o primeiro diagnóstico fatal.
 
 Não reservar antecipadamente jobs para uma fila local em memória. Essa decisão mantém os jobs pendentes visíveis ao gerenciamento e simplifica a parada.
 
-Com um worker, a sequência crescente de entrada em `ready` define FIFO. Com vários workers, as reservas são exclusivas, mas não há garantia de ordem exata de início ou término das funções. Em nenhum caso podem existir mais de N funções simultâneas.
+Com um worker, a sequência crescente de entrada em `ready` define FIFO. Com vários workers, as reservas são exclusivas, mas não há garantia de ordem exata de início ou término das funções. O limite de N funções simultâneas decorre da quantidade de loops, cada um com uma única tentativa em andamento. A exclusividade por job decorre da reserva atômica Lua; Redis não controla a quantidade de funções executadas no processo.
 
 O scheduler planejado verificará agendamentos a cada **100 ms** e promoverá vencidos para `ready`, acrescentando o histórico de `enqueued`. Até essa integração, jobs `scheduled` permanecem pendentes, inclusive retries com atraso zero.
 
@@ -432,13 +434,13 @@ Exceções dos handlers ficam restritas às respectivas tentativas e não encerr
 
 ### 9.1 Falhas de infraestrutura
 
-Falhas de acesso ao Redis encerram o loop e tornam `IsAvailable` falso, com diagnóstico em `LastError`. Sem reserva confirmada, o handler não é invocado; uma falha na conclusão não reinvoca a função nem libera outra busca. Erros de Redis não são registrados como falha do handler. Essa política mantém o processamento suspenso quando o resultado persistido é incerto.
+Uma falha de acesso ao Redis observada por qualquer worker fecha imediatamente a admissão de todo o servidor sob a barreira compartilhada, torna `IsAvailable` falso e cancela as esperas ociosas dos irmãos. `LastError` preserva a primeira falha, mesmo se outras operações admitidas também falharem. A tarefa coordenadora aguarda todos os loops; a detecção da falha não depende dessa espera agregada. Reservas admitidas antes do fechamento continuam sendo aguardadas: se confirmadas, as funções executam e suas conclusões são tentadas. Sem reserva confirmada, o handler não é invocado; uma falha na conclusão não reinvoca a função nem libera outra busca. Erros de Redis não são registrados como falha do handler. Essa política mantém o processamento suspenso quando o resultado persistido é incerto.
 
 Reenvios equivalentes de criação e conclusão são reconhecidos pelo armazenamento. Não há loop automático de retransmissão, reconciliação ou retomada; esses comportamentos ainda estão planejados. A reconciliação deverá consultar o resultado persistido usando a identidade da operação, sem repetir a função por falha de confirmação. Chamadas públicas independentes de criação continuam gerando IDs distintos.
 
 ## 10. Inicialização e recuperação
 
-A inicialização disponível verifica acesso ao armazenamento, percorre referências de todos os jobs em páginas de `SSCAN` e confere handlers, inclusive de finalizados. O diagnóstico identifica nomes e IDs ausentes, sem consumir tentativas. Também verifica o índice `processing` e os estados persistidos: resíduos impedem prontidão com diagnóstico de recuperação necessária. Registros sem ciclo/token são aceitos sem migração, com ciclo inicial `0` e token atribuído na reserva. Depois das verificações, o servidor inicia o loop e fica disponível. Um handler ausente encontrado após a inicialização também impede reserva e torna o servidor indisponível.
+A inicialização disponível verifica acesso ao armazenamento, percorre referências de todos os jobs em páginas de `SSCAN` e confere handlers, inclusive de finalizados. O diagnóstico identifica nomes e IDs ausentes, sem consumir tentativas. Também verifica o índice `processing` e os estados persistidos: resíduos impedem prontidão com diagnóstico de recuperação necessária. Registros sem ciclo/token são aceitos sem migração, com ciclo inicial `0` e token atribuído na reserva. Depois das verificações, o servidor instala os N loops e publica prontidão somente se não houver parada ou falha. Parar durante a verificação impede a liberação dos workers e aguarda a inicialização terminar. Um handler ausente encontrado após a inicialização também impede reserva e torna o servidor indisponível.
 
 A sequência completa planejada, com scheduler e recuperação, é:
 
@@ -466,13 +468,13 @@ A garantia é **at-least-once, sujeita ao limite de tentativas**. Uma função p
 A parada segue esta ordem:
 
 1. Fechar a admissão de novas reservas e marcar o servidor como indisponível.
-2. Interromper scheduler e esperas por trabalho.
-3. Aguardar as funções em execução.
-4. Persistir suas conclusões e liberar recursos.
+2. Interromper as esperas por trabalho.
+3. Aguardar todos os loops, incluindo reservas admitidas ainda sem resposta e funções em execução.
+4. Confirmar suas conclusões antes de liberar recursos; falhas de confirmação mantêm diagnóstico fatal.
 
 A reserva e a entrada em parada usam uma barreira comum para impedir que um job pendente seja assumido durante a transição. Não há cancelamento público de funções em execução.
 
-`JobServerHostedService` adapta o ciclo a `IHostedService`. O sinal de parada interrompe somente a busca e a espera ociosa; nenhuma função recebe cancelamento. Uma reserva admitida antes da parada, mesmo sem resposta Redis ainda, integra o trabalho aguardado. O adaptador aguarda mesmo com token do host expirado e a demo configura `HostOptions.ShutdownTimeout = Timeout.InfiniteTimeSpan`. Referência: [hosted services no ASP.NET Core](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/host/hosted-services?view=aspnetcore-10.0).
+`JobServerHostedService` adapta o ciclo a `IHostedService`. O sinal compartilhado é descartado somente depois do término de todos os loops. O sinal de parada interrompe somente a busca e a espera ociosa; nenhuma função recebe cancelamento. Uma reserva admitida antes da parada, mesmo sem resposta Redis ainda, integra o trabalho aguardado. O adaptador aguarda mesmo com token do host expirado e a demo configura `HostOptions.ShutdownTimeout = Timeout.InfiniteTimeSpan`. Referência: [hosted services no ASP.NET Core](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/host/hosted-services?view=aspnetcore-10.0).
 
 Se houver encerramento forçado, a inicialização disponível recusa resíduos de `processing`. Sua recuperação automática ainda não está implementada e a comprovação em processos separados está pendente.
 
@@ -497,7 +499,7 @@ Esse ajuste ainda precisa ser implementado. Dados existentes no volume nomeado p
 | Configuração | Padrão | Uso |
 | --- | --- | --- |
 | `PORT` | `8080` | Porta HTTP da demo. |
-| `WORKER_COUNT` | `4` (spec) | Configuração ainda não consumida; a demo executa um worker. |
+| `WORKER_COUNT` | `4` | Quantidade fixa de workers. Valor fornecido deve representar inteiro positivo de 32 bits; vazio, formato inválido, zero, negativo ou overflow impedem a inicialização com diagnóstico da configuração. |
 | `DATA_DIR` | `./data` (spec) | Configuração ainda não consumida; o Compose usa o volume `redis-data`. |
 | `REDIS_CONNECTION` | `127.0.0.1:6379` | Configuração adicional para a conexão da biblioteca. |
 
@@ -507,7 +509,7 @@ Esse ajuste ainda precisa ser implementado. Dados existentes no volume nomeado p
 
 A demo disponibiliza `POST /demo/jobs` para os três jobs da spec, `GET /api/jobs/{id}` para qualquer contrato persistido, `GET /demo/events` e `GET /health`. Listagem, deleção e reenfileiramento ainda não estão implementados.
 
-A composição no `Program` registra catálogo com handlers, eventos, `IJobClient`, `IJobManager`, `JobServer` e uma conexão Redis compartilhada como singletons, além do adaptador de hosting. Todos usam o mesmo prefixo padrão. O contêiner possui e descarta a conexão depois de parar o servidor; não há conexão por pedido. `PORT` configura a escuta HTTP e `REDIS_CONNECTION` configura o armazenamento.
+A composição no `Program` registra catálogo com handlers, eventos, `IJobClient`, `IJobManager`, `JobServer` e uma conexão Redis compartilhada como singletons, além do adaptador de hosting. Todos usam o mesmo prefixo padrão. O contêiner possui e descarta a conexão depois de parar o servidor; não há conexão por pedido. `PORT` configura a escuta HTTP, `REDIS_CONNECTION` configura o armazenamento e `WORKER_COUNT` configura o único `JobServer` da aplicação. A leitura e validação da quantidade ocorrem na criação desse singleton, antes de iniciar processamento.
 
 A demo adapta os contratos da biblioteca aos endpoints obrigatórios:
 
@@ -544,7 +546,7 @@ Os erros HTTP usam `{ "error": "mensagem legível" }`:
 
 Não são necessários filtros ou paginação.
 
-`/health` retorna `200 { "status": "ok" }` somente após as verificações iniciais e com o loop operacional. Na entrega disponível, resíduos que exigem recuperação impedem o início; falhas observadas de armazenamento tornam o servidor indisponível. Durante inicialização, indisponibilidade de infraestrutura ou parada, retorna `503 { "status": "unavailable" }` enquanto o HTTP estiver disponível.
+`/health` retorna `200 { "status": "ok" }` somente após as verificações iniciais e com todos os workers operacionais. Na entrega disponível, resíduos que exigem recuperação impedem o início; falhas observadas de armazenamento tornam o servidor indisponível. Durante inicialização, indisponibilidade de infraestrutura ou parada, retorna `503 { "status": "unavailable" }` enquanto o HTTP estiver disponível.
 
 ## 14. Funções e eventos da demo
 

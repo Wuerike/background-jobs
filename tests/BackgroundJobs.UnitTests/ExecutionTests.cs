@@ -137,7 +137,7 @@ public sealed class ExecutionTests
             entered.SetResult();
             await release.Task;
         });
-        await using var server = new JobServer(registry, store);
+        await using var server = new JobServer(registry, store, workerCount: 1);
         await Task.WhenAll(server.StartAsync(), server.StartAsync());
         await store.Claimed.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Task? stop = stopDuringClaim ? server.StopAsync() : null;
@@ -171,7 +171,7 @@ public sealed class ExecutionTests
         store.Candidates.Enqueue(Candidate()); store.Candidates.Enqueue(Candidate("b"));
         var registry = new JobRegistry(); var calls = 0;
         registry.Register(new JobDefinition<Args>("job"), (_, _) => { calls++; return Task.CompletedTask; });
-        await using var server = new JobServer(registry, store);
+        await using var server = new JobServer(registry, store, workerCount: 1);
         await server.StartAsync();
         await WaitUntil(() => server.LastError is not null);
         Assert.Same(error, server.LastError);
@@ -198,7 +198,7 @@ public sealed class ExecutionTests
             if (context.JobId == "a") return failure == "sync" ? throw new Exception("sync") : Task.FromException(new Exception("async"));
             second.SetResult(); return Task.CompletedTask;
         }, args => { if (failure == "validation" && args.Message == "bad") throw new JobValidationException("invalid"); });
-        await using var server = new JobServer(registry, store);
+        await using var server = new JobServer(registry, store, workerCount: 1);
         await server.StartAsync();
         await second.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await server.StopAsync();
@@ -213,7 +213,7 @@ public sealed class ExecutionTests
     public async Task Missing_handler_after_start_is_fatal_before_reservation()
     {
         var store = new Store(); store.Candidates.Enqueue(Candidate(name: "missing"));
-        await using var server = new JobServer(new JobRegistry(), store);
+        await using var server = new JobServer(new JobRegistry(), store, workerCount: 1);
         await server.StartAsync();
         await WaitUntil(() => server.LastError is not null);
         Assert.Contains("missing", server.LastError!.Message);
@@ -226,7 +226,7 @@ public sealed class ExecutionTests
     public async Task Initialization_and_hosted_stop_are_idempotent_and_idle_wait_is_interrupted()
     {
         var store = new Store();
-        await using var server = new JobServer(new JobRegistry(), store);
+        await using var server = new JobServer(new JobRegistry(), store, workerCount: 1);
         Assert.False(server.IsAvailable);
         var adapter = new JobServerHostedService(server);
         await Task.WhenAll(adapter.StartAsync(default), adapter.StartAsync(default));
@@ -285,7 +285,7 @@ public sealed class ExecutionTests
         store.Candidates.Enqueue(Candidate());
         var registry = new JobRegistry();
         registry.Register(new JobDefinition<Args>("job"), (_, _) => Task.CompletedTask);
-        await using var server = new JobServer(registry, store, clock);
+        await using var server = new JobServer(registry, store, clock, workerCount: 1);
         await server.StartAsync();
         await store.Completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await WaitUntil(() => clock.Due is not null);

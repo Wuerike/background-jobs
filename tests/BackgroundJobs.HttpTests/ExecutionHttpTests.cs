@@ -26,7 +26,7 @@ public sealed class ExecutionHttpTests
         public HttpClient Http = null!;
         public JobServer Server = null!;
         private Factory factory = null!;
-        public async Task Start(Action<JobRegistry, DemoEvents>? register = null)
+        public async Task Start(Action<JobRegistry, DemoEvents>? register = null, int workerCount = 1)
         {
             Connection = await ConnectionMultiplexer.ConnectAsync(Environment.GetEnvironmentVariable("REDIS_CONNECTION") ?? "127.0.0.1:6379");
             var registry = new JobRegistry(); var events = new DemoEvents();
@@ -39,7 +39,7 @@ public sealed class ExecutionHttpTests
                 services.RemoveAll<DemoEvents>(); services.AddSingleton(events);
                 services.RemoveAll<IJobClient>(); services.AddSingleton<IJobClient>(new RedisJobClient(registry.Contracts, Connection, Prefix));
                 services.RemoveAll<IJobManager>(); services.AddSingleton<IJobManager>(new RedisJobManager(Connection, Prefix));
-                services.RemoveAll<JobServer>(); services.AddSingleton(_ => new JobServer(registry, Connection, Prefix));
+                services.RemoveAll<JobServer>(); services.AddSingleton(_ => new JobServer(registry, Connection, Prefix, workerCount: workerCount));
             });
             Http = factory.CreateClient();
             Server = factory.Services.GetRequiredService<JobServer>();

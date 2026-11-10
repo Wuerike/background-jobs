@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using BackgroundJobs;
@@ -25,8 +26,16 @@ builder.Services.AddSingleton<IJobClient>(services => new RedisJobClient(
     services.GetRequiredService<JobRegistry>().Contracts, services.GetRequiredService<IConnectionMultiplexer>()));
 builder.Services.AddSingleton<IJobManager>(services => new RedisJobManager(services.GetRequiredService<IConnectionMultiplexer>()));
 
-builder.Services.AddSingleton(services => new JobServer(
-    services.GetRequiredService<JobRegistry>(), services.GetRequiredService<IConnectionMultiplexer>()));
+builder.Services.AddSingleton(services =>
+{
+    var setting = services.GetRequiredService<IConfiguration>()["WORKER_COUNT"];
+    var workerCount = 4;
+    if (setting is not null &&
+        (!int.TryParse(setting, NumberStyles.Integer, CultureInfo.InvariantCulture, out workerCount) || workerCount < 1))
+        throw new InvalidOperationException("WORKER_COUNT deve ser um inteiro positivo de 32 bits.");
+    return new JobServer(services.GetRequiredService<JobRegistry>(),
+        services.GetRequiredService<IConnectionMultiplexer>(), workerCount: workerCount);
+});
 builder.Services.AddHostedService<JobServerHostedService>();
 builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = Timeout.InfiniteTimeSpan);
 

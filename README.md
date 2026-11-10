@@ -3,13 +3,13 @@
 Biblioteca em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 
 - `BackgroundJobs.slnx`: solução com biblioteca, demo, testes unitários e de integração.
-- `src/BackgroundJobs`: registro tipado, criação e consulta, execução com um worker, persistência de tentativas e ciclo do servidor.
+- `src/BackgroundJobs`: registro tipado, criação e consulta, execução com workers configuráveis, persistência de tentativas e ciclo do servidor.
 - `src/BackgroundJobs.Demo`: aplicação ASP.NET Core com os três jobs da spec, criação, detalhe, eventos e health.
 - `tests/BackgroundJobs.UnitTests`: registro, preparação, modelos e orquestração, sem Redis.
 - `tests/BackgroundJobs.IntegrationTests`: criação atômica, consulta consistente, índices e concorrência com Redis real.
 - `tests/BackgroundJobs.HttpTests`: contratos HTTP, validação de entrada e integração com Redis real.
 
-A biblioteca cria, consulta e executa jobs imediatos com um worker. Sucesso e falha terminal persistem estados, histórico e tentativas. Falhas com orçamento restante ficam `scheduled`, com elegibilidade igual ao fim mais atraso. Promoção de agendamentos, execução de novas tentativas, quantidade configurável de workers, listagem, deleção, reenfileiramento e recuperação após queda ainda não estão implementados.
+A biblioteca cria, consulta e executa jobs imediatos com quantidade configurável de workers, padrão 4. Sucesso e falha terminal persistem estados, histórico e tentativas. Falhas com orçamento restante ficam `scheduled`, com elegibilidade igual ao fim mais atraso. Promoção de agendamentos, execução de novas tentativas, listagem, deleção, reenfileiramento e recuperação após queda ainda não estão implementados.
 
 ## Registro de contratos
 
@@ -51,7 +51,7 @@ const string prefix = "library-example";
 IJobClient client = new RedisJobClient(registry.Contracts, connection, prefix);
 IJobManager manager = new RedisJobManager(connection, prefix);
 var id = await client.EnqueueAsync(DemoJobs.LogMessage, new LogMessageArgs("Olá"));
-await using var server = new JobServer(registry, connection, prefix);
+await using var server = new JobServer(registry, connection, prefix, workerCount: 1);
 await server.StartAsync();
 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 JobDetails? detail;
@@ -67,13 +67,13 @@ await server.StopAsync();
 
 O exemplo usa o contrato da demo, mas o consumidor pode definir seus próprios tipos e validadores. Um produtor que apenas cadastra `Contracts.Add` pode criar e consultar sem handler; ele não deve iniciar um executor com referências sem implementação. `GetAsync` não recebe registro e devolve `null` exclusivamente para ID inexistente; erros Redis e dados inválidos propagam como falhas.
 
-A conexão é criada, compartilhada e descartada pelo chamador; os serviços não a descartam nem abrem uma conexão por pedido. Cliente, gerente e servidor aceitam `prefix`, com padrão `background-jobs`; use o mesmo em todos os componentes. Prefixos diferentes isolam armazenamentos lógicos; o exemplo usa `library-example` para isolar os dados da demo. São aceitas apenas letras ASCII, dígitos, ponto, hífen e sublinhado, sem valor vazio. Cliente e servidor também aceitam `timeProvider`, com padrão `TimeProvider.System`.
+A conexão é criada, compartilhada e descartada pelo chamador; os serviços não a descartam nem abrem uma conexão por pedido. Cliente, gerente e servidor aceitam `prefix`, com padrão `background-jobs`; use o mesmo em todos os componentes. Prefixos diferentes isolam armazenamentos lógicos; o exemplo usa `library-example` para isolar os dados da demo. São aceitas apenas letras ASCII, dígitos, ponto, hífen e sublinhado, sem valor vazio. Cliente e servidor também aceitam `timeProvider`, com padrão `TimeProvider.System`. O servidor aceita `workerCount` como último argumento, com padrão 4 e mínimo 1; a quantidade fica fixa durante a vida da instância. Use `workerCount: 1` para FIFO pela sequência persistida de entrada na fila. Com vários workers, não há garantia da ordem exata de início ou término. A reserva Lua garante exclusividade por job; a quantidade de loops limita as funções simultâneas. Handlers e validadores podem executar simultaneamente e devem sincronizar seu estado compartilhado.
 
 O ID retorna somente após confirmação da criação. A escrita inclui dados, histórico e índices na mesma operação. Jobs futuros ficam `Scheduled`, com data exata preservada, aguardando promoção, ainda não implementada. Não há loop próprio de retry/reconciliação de falhas de rede; uma falha de confirmação não deve ser interpretada como prova de ausência do pedido. Chamadas públicas independentes geram IDs distintos.
 
-`JobServer` verifica handlers de todos os jobs armazenados, inclusive finalizados, antes de liberar o loop. `processing` residual impede prontidão com diagnóstico de recuperação pendente. `IsAvailable` informa disponibilidade e `LastError` expõe erro fatal. Erros de desserialização, validação ou função fecham a tentativa e não impedem outros jobs; falhas Redis encerram o loop sem reinvocar a função nem buscar outro job.
+`JobServer` verifica handlers de todos os jobs armazenados, inclusive finalizados, antes de liberar os workers. `processing` residual impede prontidão com diagnóstico de recuperação pendente. `IsAvailable` informa disponibilidade e `LastError` expõe erro fatal. Erros de desserialização, validação ou função fecham a tentativa e não impedem outros jobs; falhas Redis fecham a admissão de todos os workers e cancelam suas esperas ociosas, sem reinvocar funções. O primeiro diagnóstico é preservado; reservas já admitidas continuam sendo aguardadas e, quando confirmadas, executam e tentam persistir o resultado.
 
-`StartAsync` inicia uma instância uma única vez e compartilha a inicialização entre chamadas repetidas. `StopAsync` fecha novas reservas e aguarda a reserva admitida, a função e sua confirmação; não cancela handlers. A parada é idempotente. Para outro ciclo de serviço, crie uma nova instância. `JobServerHostedService`, em `BackgroundJobs.Hosting`, oferece integração `IHostedService`; o host deve permitir espera ilimitada na parada, como na composição da demo.
+`StartAsync` inicia uma instância uma única vez e compartilha a inicialização entre chamadas repetidas. `StopAsync` fecha novas reservas e aguarda todas as reservas admitidas, funções e confirmações; não cancela handlers. A parada é idempotente. Para outro ciclo de serviço, crie uma nova instância. `JobServerHostedService`, em `BackgroundJobs.Hosting`, oferece integração `IHostedService`; o host deve permitir espera ilimitada na parada, como na composição da demo.
 
 ## Redis local
 
@@ -145,7 +145,15 @@ A demo escuta na porta definida por `PORT` (padrão `8080`) e usa `REDIS_CONNECT
 PORT=8081 REDIS_CONNECTION=127.0.0.1:6380 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
 ```
 
-A demo executa explicitamente **um worker**. `WORKER_COUNT` (padrão 4 na spec) e `DATA_DIR` ainda não são consumidos. O Compose mantém os dados no volume `redis-data`.
+A demo usa `WORKER_COUNT`, com padrão **4**. Um valor fornecido precisa ser inteiro positivo de 32 bits; vazio, formato inválido, zero, negativo ou overflow impedem a inicialização com mensagem que identifica a configuração. Para FIFO, inicie com um worker; para observar concorrência, use dois:
+
+```bash
+WORKER_COUNT=1 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
+# Após parar a aplicação, iniciar com dois workers:
+WORKER_COUNT=2 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
+```
+
+Use apenas um executor por armazenamento. `DATA_DIR` ainda não é consumido; o Compose mantém os dados no volume `redis-data`.
 
 Os diretórios de saída são centralizados na pasta `build/` da raiz por `Directory.Build.props`, usando o [layout de artefatos do SDK](https://learn.microsoft.com/pt-br/dotnet/core/sdk/artifacts-output):
 
@@ -179,6 +187,28 @@ Os contratos disponíveis são:
 | `succeed-after` | `{"delayMs":0}`; inteiro de 0 a 60000. |
 | `fail-n-times` | `{"failTimes":1}`; inteiro de 0 a 10. Falha com `demo failure` enquanto `context.Attempt <= failTimes`. |
 | `log-message` | `{"message":"Olá"}`; texto de até 200 unidades UTF-16. |
+
+Para verificar FIFO, inicie a demo com `WORKER_COUNT=1` e envie mensagens sequencialmente:
+
+```bash
+for message in A B C; do
+  curl --fail-with-body -sS "$base/demo/jobs" -H 'Content-Type: application/json' \
+    -d "{\"job\":\"log-message\",\"params\":{\"message\":\"$message\"}}"
+done
+curl --fail-with-body -sS "$base/demo/events"
+```
+
+Os eventos `message` devem mostrar A/B/C nessa ordem. Após uma parada limpa, inicie com `WORKER_COUNT=2` e crie seis esperas:
+
+```bash
+for i in 1 2 3 4 5 6; do
+  curl --fail-with-body -sS "$base/demo/jobs" -H 'Content-Type: application/json' \
+    -d '{"job":"succeed-after","params":{"delayMs":1000}}'
+done
+curl --fail-with-body -sS "$base/demo/events"
+```
+
+Consulte os seis IDs até `succeeded`, cada um com uma tentativa. Na sequência de eventos desses IDs, incremente um contador em `started` e decremente em `finished`: o pico deve atingir 2 sem ultrapassá-lo, cada ID deve começar uma vez e o saldo final deve ser zero. Sem `WORKER_COUNT`, o mesmo cenário usa quatro workers e atinge pico 4. Os testes HTTP reproduzem essas verificações com os jobs reais e a composição do `Program`.
 
 Para demonstrar falha terminal, continuidade e retry pendente:
 
@@ -224,10 +254,20 @@ REDIS_CONNECTION=127.0.0.1:6380 dotnet test tests/BackgroundJobs.HttpTests --no-
 
 A cobertura está nos [testes unitários](tests/BackgroundJobs.UnitTests), nos [testes de persistência e processamento](tests/BackgroundJobs.IntegrationTests) e nos [testes HTTP](tests/BackgroundJobs.HttpTests). Eles verificam contratos e validação, reserva exclusiva, conclusão atômica e idempotente, índices, snapshots consistentes, isolamento de erros e parada coordenada. O aceite HTTP cobre sucesso imediato com históricos e eventos, início em até 2 segundos com worker livre, falha terminal, continuidade e retry pendente. A execução pela biblioteca também é verificada sem HTTP.
 
-Os testes HTTP de criação/consulta isolam o motor na composição de teste; uma suíte separada usa o motor ativo, com prefixo exclusivo compartilhado e parada antes da limpeza. Não há flag de produto para desativar o motor.
+Os testes HTTP de criação/consulta isolam o motor na composição de teste. Os testes de execução usam o motor ativo; os de configuração preservam a criação real do `JobServer` pelo `Program`, isolando configuração por host e chaves pela conexão de teste. Todos param o servidor antes da limpeza. Não há flag de produto para desativar o motor.
 
-O resultado verificado é build sem avisos ou erros e **369 testes aprovados** (147 unitários, 105 de integração e 117 HTTP), sem falhas ou testes ignorados, com SDK 10.0.114 e Redis 8.2.10 dedicado na porta 16379, AOF, `appendfsync always` e `noeviction`. A demonstração com a aplicação real concluiu o pedido imediato em **94,66 ms** desde o início da criação e confirmou falha terminal, continuidade, retry pendente e nove eventos. Esses tempos são observações locais, sem garantia de tempo real.
+O resultado verificado é build sem avisos ou erros e **417 testes aprovados** (173 unitários, 113 de integração e 131 HTTP), sem falhas ou testes ignorados, com SDK 10.0.114 e Redis 8.2.10 na porta 16379, AOF, `appendfsync always` e `noeviction`. A cobertura inclui limite e progresso dos workers, disputa pela mesma cabeça, FIFO com timestamps iguais, isolamento de erros de função, falha fatal global, espera por reservas/conclusões pendentes, inicialização e parada coordenadas. A integração verifica índices, snapshots e execução dos pendentes por nova instância após parada limpa.
+
+A demonstração em processos reais usou um Redis dedicado vazio por cenário, com as mesmas configurações de persistência e portas isoladas:
+
+| Configuração | Pedidos demonstrados | Pico observado | Eventos | Tentativas por job |
+| --- | --- | --- | --- | --- |
+| `WORKER_COUNT=1` | Mensagens A/B/C, nessa ordem | 1 | 9 | 1 |
+| `WORKER_COUNT=2` | Seis esperas de 750 ms | 2 | 12 | 1 |
+| Ausente (padrão 4) | Seis esperas de 750 ms | 4 | 12 | 1 |
+
+Cada cenário confirmou detalhes `succeeded`, histórico completo e ausência de invocação duplicada. Pedidos adicionais com espera zero concluíram em **100,76 ms**, **93,20 ms** e **47,25 ms**, respectivamente, medidos desde o início da criação até a consulta final. O pico é calculado pela ordem de registro dos eventos, sem ordenar timestamps. Esses tempos são observações locais, sem garantia de tempo real.
 
 Nesse ambiente WSL, sem Docker disponível, Redis usa a distribuição oficial compilada em `/tmp`, com Zig 0.14.1 e runtime libgcc 13.3. Para reprodução habitual, use o Compose documentado ou Redis externo com as mesmas configurações; configure `REDIS_CONNECTION` com a porta escolhida.
 
-O critério 1 da spec está verificado. Configuração de concorrência, promoção e execução de retry, operações manuais, recuperação após queda e `DATA_DIR` ainda não estão implementados. As operações reconhecem reenvios equivalentes de criação/conclusão, mas não há reconciliação ou retomada automática após falha de confirmação. A parada básica foi verificada com sinais e Redis real; testes em processos separados e `kill -9` ainda estão pendentes.
+Os critérios 1, 3 e 4 da spec estão verificados. Promoção e execução de retry, operações manuais, recuperação após queda e `DATA_DIR` ainda não estão implementados. As operações reconhecem reenvios equivalentes de criação/conclusão, mas não há reconciliação ou retomada automática após falha de confirmação. A parada básica foi verificada com sinais e Redis real; validação de parada com funções ativas em processos separados e recuperação após `kill -9` ainda estão pendentes.

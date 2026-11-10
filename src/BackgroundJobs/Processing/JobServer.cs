@@ -4,12 +4,13 @@ using StackExchange.Redis;
 
 namespace BackgroundJobs;
 
-/// <summary>A single-worker executor. The caller owns the connection and configures the registry before starting.</summary>
+/// <summary>A fixed-size executor. The caller owns the connection and configures the registry before starting.</summary>
 public sealed class JobServer : IAsyncDisposable
 {
     private readonly IProcessingStore store;
     private readonly JobHandlers handlers;
     private readonly TimeProvider clock;
+    private readonly int workerCount;
     private readonly object admission = new();
     private readonly CancellationTokenSource stopping = new();
     private readonly TaskCompletionSource initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -20,16 +21,24 @@ public sealed class JobServer : IAsyncDisposable
     private Exception? lastError;
 
     public JobServer(JobRegistry registry, IConnectionMultiplexer connection,
-        string prefix = "background-jobs", TimeProvider? timeProvider = null)
-        : this(registry, new RedisJobStore(connection, prefix), timeProvider) { }
+        string prefix = "background-jobs", TimeProvider? timeProvider = null, int workerCount = 4)
+        : this(registry, CreateStore(connection, prefix, workerCount), timeProvider, workerCount) { }
 
-    internal JobServer(JobRegistry registry, IProcessingStore store, TimeProvider? timeProvider = null)
+    internal JobServer(JobRegistry registry, IProcessingStore store, TimeProvider? timeProvider = null, int workerCount = 4)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(workerCount, 1);
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(store);
         handlers = registry.Handlers;
         this.store = store;
         clock = timeProvider ?? TimeProvider.System;
+        this.workerCount = workerCount;
+    }
+
+    private static RedisJobStore CreateStore(IConnectionMultiplexer connection, string prefix, int workerCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(workerCount, 1);
+        return new RedisJobStore(connection, prefix);
     }
 
     public bool IsAvailable { get { lock (admission) return available && runner is { IsCompleted: false }; } }
@@ -76,11 +85,40 @@ public sealed class JobServer : IAsyncDisposable
             }
             if (missing.Count > 0) throw new InvalidOperationException("Handlers ausentes: " + string.Join(", ", missing));
             if (residual) throw new InvalidOperationException("Há jobs em processamento que exigem recuperação; o servidor não pode iniciar.");
-            lock (admission) available = !stopRequested;
-            initialized.TrySetResult();
+            Task[] workers;
+            lock (admission)
+            {
+                workers = stopping.IsCancellationRequested ? [] : Enumerable.Range(0, workerCount).Select(_ => Task.Run(WorkAsync)).ToArray();
+                available = !stopping.IsCancellationRequested;
+                initialized.TrySetResult();
+            }
+            await Task.WhenAll(workers).ConfigureAwait(false);
+        }
+        catch (Exception failure)
+        {
+            Fail(failure);
+            initialized.TrySetException(failure);
+        }
+        finally { lock (admission) available = false; }
+    }
+
+    private void Fail(Exception failure)
+    {
+        lock (admission)
+        {
+            lastError ??= failure;
+            available = false;
+            stopping.Cancel();
+        }
+    }
+
+    private async Task WorkAsync()
+    {
+        try
+        {
             while (true)
             {
-                lock (admission) { if (stopRequested) break; }
+                lock (admission) { if (stopping.IsCancellationRequested) break; }
                 var candidate = await store.PeekAsync().ConfigureAwait(false);
                 if (candidate is null)
                 {
@@ -91,12 +129,20 @@ public sealed class JobServer : IAsyncDisposable
                 Task<ClaimedJob?> reservation;
                 lock (admission)
                 {
-                    if (stopRequested) break;
-                    if (!handlers.Contains(candidate.Job.Name))
-                        throw new InvalidOperationException($"Handler ausente: '{candidate.Job.Name}' (job '{candidate.Job.Id}').");
-                    // Calling the async operation under this lock admits even a reservation
-                    // that has not yet received its Redis acknowledgement when StopAsync runs.
-                    reservation = store.TryClaimAsync(candidate, clock.GetUtcNow(), Guid.NewGuid().ToString("N"));
+                    if (stopping.IsCancellationRequested) break;
+                    try
+                    {
+                        if (!handlers.Contains(candidate.Job.Name))
+                            throw new InvalidOperationException($"Handler ausente: '{candidate.Job.Name}' (job '{candidate.Job.Id}').");
+                        // Calling the async operation under this lock admits even a reservation
+                        // that has not yet received its Redis acknowledgement when StopAsync runs.
+                        reservation = store.TryClaimAsync(candidate, clock.GetUtcNow(), Guid.NewGuid().ToString("N"));
+                    }
+                    catch (Exception failure)
+                    {
+                        Fail(failure);
+                        return;
+                    }
                 }
                 var claim = await reservation.ConfigureAwait(false);
                 if (claim is null) continue;
@@ -114,10 +160,10 @@ public sealed class JobServer : IAsyncDisposable
         }
         catch (Exception failure)
         {
-            lock (admission) { lastError = failure; available = false; }
-            initialized.TrySetException(failure);
+            // Close admission as soon as this worker observes the failure. The coordinator
+            // still drains siblings, including reservations awaiting acknowledgement.
+            Fail(failure);
         }
-        finally { lock (admission) available = false; }
     }
 
     public async ValueTask DisposeAsync()

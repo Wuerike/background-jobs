@@ -5,7 +5,7 @@ using StackExchange.Redis;
 
 namespace BackgroundJobs.IntegrationTests;
 
-public sealed class ProcessingTests : IAsyncLifetime
+public sealed partial class ProcessingTests : IAsyncLifetime
 {
     private readonly string prefix = "processing-" + Guid.NewGuid().ToString("N");
     private ConnectionMultiplexer connection = null!;
@@ -247,7 +247,7 @@ public sealed class ProcessingTests : IAsyncLifetime
         await store.CreateAsync(Request("a", new JobOptions { MaxAttempts = 1 }));
         await store.CreateAsync(Request("b"));
         await db.HashSetAsync(prefix + ":job:a", "args", validation ? "{\"message\":\"invalid\"}" : "{}");
-        await using var server = new JobServer(executionRegistry, connection, prefix);
+        await using var server = new JobServer(executionRegistry, connection, prefix, workerCount: 1);
         await server.StartAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         while ((await Detail("b")).State != JobState.Succeeded) await Task.Delay(5, timeout.Token);
@@ -342,7 +342,7 @@ public sealed class ProcessingTests : IAsyncLifetime
             if (context.JobId == "b") throw new InvalidOperationException("demo failure");
         });
         foreach (var id in new[] { "a", "b", "c" }) await store.CreateAsync(Request(id, new JobOptions { MaxAttempts = 1 }));
-        await using var server = new JobServer(executionRegistry, connection, prefix);
+        await using var server = new JobServer(executionRegistry, connection, prefix, workerCount: 1);
         await server.StartAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         while ((await Detail("c")).State != JobState.Succeeded) await Task.Delay(5, timeout.Token);
@@ -362,7 +362,7 @@ public sealed class ProcessingTests : IAsyncLifetime
         var executionRegistry = new JobRegistry();
         executionRegistry.Register(definition, async (_, context) => { Assert.Equal("a", context.JobId); entered.SetResult(); await release.Task; });
         await store.CreateAsync(Request("a")); await store.CreateAsync(Request("b"));
-        await using var server = new JobServer(executionRegistry, connection, prefix);
+        await using var server = new JobServer(executionRegistry, connection, prefix, workerCount: 1);
         await server.StartAsync();
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Equal(JobState.Processing, (await Detail()).State);
