@@ -11,7 +11,7 @@ using StackExchange.Redis;
 
 namespace BackgroundJobs.HttpTests;
 
-public sealed class JobHttpTests : IAsyncLifetime
+public sealed partial class JobHttpTests : IAsyncLifetime
 {
     private static readonly DateTimeOffset Now = new(2026, 11, 10, 0, 0, 0, TimeSpan.Zero);
     private sealed class Clock : TimeProvider { public override DateTimeOffset GetUtcNow() => Now; }
@@ -269,6 +269,9 @@ public sealed class JobHttpTests : IAsyncLifetime
     private sealed class SnapshotManager(JobDetails snapshot) : IJobManager
     {
         public Task<JobDetails?> GetAsync(string id) => Task.FromResult<JobDetails?>(snapshot);
+        public Task<IReadOnlyList<JobSummary>> ListAsync() => throw new NotSupportedException();
+        public Task<JobOperationResult> DeleteAsync(string id) => throw new NotSupportedException();
+        public Task<JobOperationResult> RequeueAsync(string id) => throw new NotSupportedException();
     }
 
     [Theory]
@@ -337,6 +340,15 @@ public sealed class JobHttpTests : IAsyncLifetime
         await AssertError(create, HttpStatusCode.InternalServerError);
         using var read = await failingHttp.GetAsync("/api/jobs/unknown");
         await AssertError(read, HttpStatusCode.InternalServerError);
+        foreach (var path in new[] { "/api/jobs", "/api/jobs/unknown" })
+        {
+            using var response = await failingHttp.GetAsync(path);
+            await AssertError(response, HttpStatusCode.InternalServerError);
+        }
+        using var deletion = await failingHttp.DeleteAsync("/api/jobs/unknown");
+        await AssertError(deletion, HttpStatusCode.InternalServerError);
+        using var requeue = await failingHttp.PostAsync("/api/jobs/unknown/requeue", null);
+        await AssertError(requeue, HttpStatusCode.InternalServerError);
         await AssertNoJobs();
     }
 

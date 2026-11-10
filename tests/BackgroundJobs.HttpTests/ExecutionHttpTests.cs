@@ -13,7 +13,7 @@ using StackExchange.Redis;
 
 namespace BackgroundJobs.HttpTests;
 
-public sealed class ExecutionHttpTests
+public sealed partial class ExecutionHttpTests
 {
     private sealed class Factory(Action<IServiceCollection> configure) : WebApplicationFactory<Program>
     {

@@ -8,6 +8,9 @@ public class ClientTests
 {
     private sealed class ControlledStore : IJobStore
     {
+        public Task<IReadOnlyList<JobSummary>> ListAsync() => throw new NotSupportedException();
+        public Task<JobOperationResult> DeleteAsync(string id, TimeProvider clock) => throw new NotSupportedException();
+        public Task<JobOperationResult> RequeueAsync(string id, TimeProvider clock) => throw new NotSupportedException();
         public List<NewJob> Writes { get; } = [];
         public TaskCompletionSource Confirmation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task CreateAsync(NewJob job) { Writes.Add(job); return Confirmation.Task; }

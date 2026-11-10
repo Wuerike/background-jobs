@@ -4,6 +4,11 @@ internal sealed record JobCandidate(JobDetails Job, string Snapshot, string Cycl
 internal sealed record ClaimedJob(JobDetails Job, int Attempt, string Cycle, string Token, DateTimeOffset StartedAt);
 internal sealed record AttemptCompletion(ClaimedJob Claim, DateTimeOffset FinishedAt, string? Error);
 internal sealed record ScheduledCandidate(JobDetails Job, string Snapshot, double Score);
+internal sealed class ScheduledBatch(IList<ScheduledCandidate> candidates, int? examinedCount = null)
+    : System.Collections.ObjectModel.ReadOnlyCollection<ScheduledCandidate>(candidates)
+{
+    public int ExaminedCount { get; } = examinedCount ?? candidates.Count;
+}
 internal enum PromotionResult { Promoted, LostRace }
 internal sealed record JobReference(string Id, string Name, JobState State);
 
@@ -11,7 +16,7 @@ internal interface IProcessingStore
 {
     IAsyncEnumerable<JobReference> ReadReferencesAsync();
     Task<bool> HasProcessingAsync();
-    Task<IReadOnlyList<ScheduledCandidate>> ReadScheduledAsync(DateTimeOffset now, long offset);
+    Task<ScheduledBatch> ReadScheduledAsync(DateTimeOffset now, long offset);
     Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now);
     Task<JobCandidate?> PeekAsync();
     Task<ClaimedJob?> TryClaimAsync(JobCandidate candidate, DateTimeOffset startedAt, string token);

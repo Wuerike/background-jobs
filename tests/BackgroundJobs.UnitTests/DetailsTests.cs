@@ -50,7 +50,7 @@ public class DetailsTests
     }
 
     [Fact]
-    public void Public_creation_and_query_contracts_have_only_typed_creation_and_id_lookup()
+    public void Public_creation_is_typed_and_detail_lookup_is_nullable()
     {
         var create = Assert.Single(typeof(IJobClient).GetMethods());
         Assert.Equal(typeof(Task<string>), create.ReturnType);
@@ -62,7 +62,7 @@ public class DetailsTests
         Assert.True(parameters[2].HasDefaultValue);
         Assert.Null(parameters[2].DefaultValue);
 
-        var query = Assert.Single(typeof(IJobManager).GetMethods());
+        var query = Assert.Single(typeof(IJobManager).GetMethods(), method => method.Name == nameof(IJobManager.GetAsync));
         Assert.Equal(typeof(Task<JobDetails>), query.ReturnType);
         Assert.Equal(typeof(string), Assert.Single(query.GetParameters()).ParameterType);
         var nullability = new System.Reflection.NullabilityInfoContext().Create(query.ReturnParameter);

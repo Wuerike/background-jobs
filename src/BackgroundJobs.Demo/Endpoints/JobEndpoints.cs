@@ -29,6 +29,12 @@ internal static class JobEndpoints
             ? Results.Ok(new { status = "ok" })
             : Results.Json(new { status = "unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable));
 
+        app.MapGet("/api/jobs", async (IJobManager manager) => Results.Ok(new { items = await manager.ListAsync() }));
+        app.MapDelete("/api/jobs/{id}", async (string id, IJobManager manager) =>
+            MutationResponse(await manager.DeleteAsync(id), id, false));
+        app.MapPost("/api/jobs/{id}/requeue", async (string id, IJobManager manager) =>
+            MutationResponse(await manager.RequeueAsync(id), id, true));
+
         app.MapGet("/api/jobs/{id}", async (string id, IJobManager manager) =>
         {
             var detail = await manager.GetAsync(id);
@@ -37,4 +43,14 @@ internal static class JobEndpoints
                 : Results.Ok(detail);
         });
     }
+    private static IResult MutationResponse(JobOperationResult result, string id, bool requeue) => result switch
+    {
+        JobOperationResult.Applied => requeue
+            ? Results.Json(new { jobId = id }, statusCode: StatusCodes.Status202Accepted)
+            : Results.Ok(new { id, state = "deleted" }),
+        JobOperationResult.NotFound => Results.NotFound(new { error = "Job não encontrado." }),
+        JobOperationResult.Conflict => Results.Conflict(new { error = "Operação incompatível com o estado atual do job." }),
+        _ => throw new InvalidOperationException("Resultado de gerenciamento desconhecido.")
+    };
+
 }

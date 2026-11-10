@@ -14,6 +14,8 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
     private static readonly string ClaimScript = LoadScript("processing-common") + "\n" + LoadScript("claim");
     private static readonly string CompleteScript = LoadScript("processing-common") + "\n" + LoadScript("complete");
     private static readonly string PromoteScript = LoadScript("processing-common") + "\n" + LoadScript("promote");
+    private static readonly string ManageScript = LoadScript("processing-common") + "\n" + LoadScript("manage");
+    private static readonly string ScheduledReadScript = LoadScript("processing-common") + "\n" + LoadScript("read-scheduled");
     internal const int ScheduledBatchSize = 128;
     private readonly IDatabase database;
     private readonly string prefix;
@@ -57,6 +59,105 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         return result.Length == 0 ? null : JobCodec.Read(id, result);
     }
 
+    public async Task<IReadOnlyList<JobSummary>> ListAsync()
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var items = new List<JobSummary>();
+        await foreach (var value in database.SetScanAsync($"{prefix}:jobs", pageSize: 128).ConfigureAwait(false))
+        {
+            var id = (string)value!;
+            if (!seen.Add(id)) continue;
+            var fields = await database.HashGetAsync(Keys(id)[0], ["id", "name", "state", "attempts"]).ConfigureAwait(false);
+            items.Add(JobCodec.ReadSummary(id, fields));
+        }
+        return items.AsReadOnly();
+    }
+
+    public Task<JobOperationResult> DeleteAsync(string id, TimeProvider clock) => ManageAsync(id, clock, false);
+    public Task<JobOperationResult> RequeueAsync(string id, TimeProvider clock) => ManageAsync(id, clock, true);
+
+    private async Task<JobOperationResult> ManageAsync(string id, TimeProvider clock, bool requeue)
+    {
+        ArgumentNullException.ThrowIfNull(id);
+        while (true)
+        {
+            var raw = (RedisResult[])(await database.ScriptEvaluateAsync(GetScript, Keys(id)[..3]).ConfigureAwait(false))!;
+            var snapshot = "";
+            var at = "";
+            var history = "";
+            var extra = "";
+            if (raw.Length != 0)
+            {
+                var (job, json, fields) = MaterializeProcessingSnapshot(id, raw);
+                var cycle = ValidateManagement(job, fields);
+                snapshot = json;
+                if (job.ScheduledAt is { } due) extra = JobCodec.ScheduledScore(due).ToString(CultureInfo.InvariantCulture);
+                var allowed = requeue ? job.State is JobState.Succeeded or JobState.Failed or JobState.Deleted
+                    : job.State is JobState.Scheduled or JobState.Enqueued;
+                if (allowed)
+                {
+                    var now = clock.GetUtcNow().ToUniversalTime();
+                    if (now < job.UpdatedAt) throw new InvalidDataException("Management time precedes job update.");
+                    at = JobCodec.DateText(now);
+                    history = JsonSerializer.Serialize(new { state = requeue ? "enqueued" : "deleted", at,
+                        reason = requeue ? "manual requeue" : "manual deletion" });
+                    if (requeue) extra = checked(cycle + 1).ToString(CultureInfo.InvariantCulture);
+                }
+            }
+            var result = (long)await database.ScriptEvaluateAsync(ManageScript, ProcessingKeys(id),
+                [id, snapshot, requeue ? "requeue" : "delete", at, history, extra]).ConfigureAwait(false);
+            switch (result)
+            {
+                case 1: return JobOperationResult.Applied;
+                case 2: return JobOperationResult.NotFound;
+                case 3: return JobOperationResult.Conflict;
+                case 0: continue; // The script proved progress and performed no write.
+                default: throw new InvalidDataException("Redis did not confirm management operation.");
+            }
+        }
+    }
+
+    private static long ValidateManagement(JobDetails job, Dictionary<string, string> fields)
+    {
+        var cycle = JobCodec.Cycle(fields.GetValueOrDefault("cycle", "0"));
+        var number = 0;
+        var record = 0;
+        if (job.History[0].State is not (JobState.Scheduled or JobState.Enqueued) ||
+            job.CreatedAt != job.History[0].At || job.UpdatedAt < job.CreatedAt ||
+            job.History.Zip(job.History.Skip(1)).Any(p => p.First.At > p.Second.At))
+            throw new InvalidDataException($"Inconsistent job history for '{job.Id}'.");
+        for (var i = 0; i < job.History.Count; i++)
+        {
+            var change = job.History[i];
+            if (change.Reason == "manual requeue") number = 0;
+            if (change.State != JobState.Processing) continue;
+            if (record >= job.AttemptHistory.Count)
+                throw new InvalidDataException($"Missing recorded attempt for '{job.Id}'.");
+            var attempt = job.AttemptHistory[record++];
+            if (attempt.Attempt != ++number || attempt.StartedAt != change.At ||
+                (i + 1 == job.History.Count ? attempt.FinishedAt is not null || attempt.Error is not null :
+                    attempt.FinishedAt != job.History[i + 1].At ||
+                    (job.History[i + 1].State == JobState.Succeeded ? attempt.Outcome != JobAttemptOutcome.Succeeded || attempt.Error is not null :
+                        attempt.Outcome is not (JobAttemptOutcome.Failed or JobAttemptOutcome.Interrupted))))
+                throw new InvalidDataException($"Inconsistent recorded attempt for '{job.Id}'.");
+        }
+        if (number != job.Attempts || record != job.AttemptHistory.Count)
+            throw new InvalidDataException($"Inconsistent attempt history for '{job.Id}'.");
+        var attempts = job.AttemptHistory.TakeLast(job.Attempts).ToArray();
+        if (!attempts.Select(a => a.Attempt).SequenceEqual(Enumerable.Range(1, job.Attempts)) ||
+            (job.State == JobState.Processing ? attempts.Length == 0 || attempts[^1].FinishedAt is not null ||
+                attempts[^1].Error is not null || !fields.TryGetValue("attemptToken", out var token) || string.IsNullOrEmpty(token) ||
+                fields.GetValueOrDefault("attemptIndex") != (job.AttemptHistory.Count - 1).ToString(CultureInfo.InvariantCulture)
+                : job.AttemptHistory.Any(a => a.FinishedAt is null)) ||
+            (job.State is JobState.Scheduled or JobState.Enqueued && job.Attempts >= job.MaxAttempts) ||
+            (job.State == JobState.Succeeded && (attempts.Length == 0 || attempts[^1].Outcome != JobAttemptOutcome.Succeeded)) ||
+            (job.State == JobState.Failed && (job.Attempts != job.MaxAttempts || attempts[^1].Outcome != JobAttemptOutcome.Failed)) ||
+            (job.State == JobState.Scheduled && job.Attempts > 0 &&
+                (attempts[^1].Outcome != JobAttemptOutcome.Failed || attempts[^1].FinishedAt!.Value.AddMilliseconds(job.RetryDelayMs) != job.ScheduledAt)))
+            throw new InvalidDataException($"Inconsistent attempt metadata for '{job.Id}'.");
+        return cycle;
+    }
+
     private RedisKey[] ProcessingKeys(string id) => [.. Keys(id), $"{prefix}:processing"];
 
     public async IAsyncEnumerable<JobReference> ReadReferencesAsync()
@@ -78,6 +179,11 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
     {
         var result = (RedisResult[])(await database.ScriptEvaluateAsync(GetScript, Keys(id)[..3]).ConfigureAwait(false))!;
         if (result.Length == 0) throw new InvalidDataException($"Missing processing candidate '{id}'.");
+        return MaterializeProcessingSnapshot(id, result);
+    }
+
+    private static (JobDetails Job, string Snapshot, Dictionary<string, string> Fields) MaterializeProcessingSnapshot(string id, RedisResult[] result)
+    {
         var job = JobCodec.Read(id, result);
         var lists = result.Select(r => ((RedisResult[])r!).Select(v => (string)v!).ToArray()).ToArray();
         var fields = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -89,25 +195,26 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         return (job, JsonSerializer.Serialize(lists), fields);
     }
 
-    public async Task<IReadOnlyList<ScheduledCandidate>> ReadScheduledAsync(DateTimeOffset now, long offset)
+    public async Task<ScheduledBatch> ReadScheduledAsync(DateTimeOffset now, long offset)
     {
         var entries = await database.SortedSetRangeByScoreWithScoresAsync($"{prefix}:scheduled",
             double.NegativeInfinity, JobCodec.ScheduledScore(now), skip: offset, take: ScheduledBatchSize).ConfigureAwait(false);
         var candidates = new List<ScheduledCandidate>(entries.Length);
         foreach (var entry in entries)
         {
-            var (job, snapshot, _) = await ReadProcessingSnapshot((string)entry.Element!).ConfigureAwait(false);
-            if (job.State != JobState.Scheduled || job.ScheduledAt is not { } due ||
-                JobCodec.ScheduledScore(due) != entry.Score || job.Attempts >= job.MaxAttempts ||
-                job.AttemptHistory.Any(a => a.FinishedAt is null) ||
-                (job.Attempts == 0 ? job.AttemptHistory.Count != 0 :
-                    job.AttemptHistory.Count == 0 || job.AttemptHistory[^1].Attempt != job.Attempts ||
-                    job.AttemptHistory[^1].Outcome != JobAttemptOutcome.Failed ||
-                    job.AttemptHistory[^1].FinishedAt!.Value.AddMilliseconds(job.RetryDelayMs) != due))
+            var id = (string)entry.Element!;
+            var raw = (RedisResult[])(await database.ScriptEvaluateAsync(ScheduledReadScript, ProcessingKeys(id),
+                [id]).ConfigureAwait(false))!;
+            var (job, snapshot, fields) = MaterializeProcessingSnapshot(id, raw[..3]);
+            ValidateManagement(job, fields);
+            if (job.State != JobState.Scheduled) continue;
+            var currentScore = double.Parse((string)raw[3]!, CultureInfo.InvariantCulture);
+            if (job.ScheduledAt is not { } due || JobCodec.ScheduledScore(due) != currentScore)
                 throw new InvalidDataException($"Invalid scheduled metadata for '{job.Id}'.");
+            if (currentScore != entry.Score) continue;
             candidates.Add(new(job, snapshot, entry.Score));
         }
-        return candidates;
+        return new ScheduledBatch(candidates, entries.Length);
     }
 
     public async Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now)
@@ -119,15 +226,22 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
             throw new InvalidDataException("Invalid promotion eligibility.");
         var history = JsonSerializer.Serialize(new { state = "enqueued", at = JobCodec.DateText(now),
             reason = job.Attempts == 0 ? "schedule eligible" : "retry eligible" });
-        var result = await database.ScriptEvaluateAsync(PromoteScript, ProcessingKeys(job.Id),
+        var result = (RedisResult[])(await database.ScriptEvaluateAsync(PromoteScript, ProcessingKeys(job.Id),
             [job.Id, candidate.Snapshot, candidate.Score.ToString("R", CultureInfo.InvariantCulture),
-             JobCodec.DateText(due), JobCodec.DateText(now), history, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(candidate.Snapshot)))]).ConfigureAwait(false);
-        return (long)result switch
+             JobCodec.DateText(due), JobCodec.DateText(now), history]).ConfigureAwait(false))!;
+        if (result.Length == 1 && (long)result[0] == 1) return PromotionResult.Promoted;
+        if (result.Length == 5 && (long)result[0] == 0)
         {
-            1 => PromotionResult.Promoted,
-            0 => PromotionResult.LostRace,
-            _ => throw new InvalidDataException("Redis did not confirm promotion.")
-        };
+            // Validate the exact snapshot that proved progress, including a later cycle.
+            // A receipt or changed state alone must never hide malformed persisted data.
+            var (current, _, fields) = MaterializeProcessingSnapshot(job.Id, result[1..4]);
+            ValidateManagement(current, fields);
+            if (current.State == JobState.Scheduled &&
+                JobCodec.ScheduledScore(current.ScheduledAt!.Value) != double.Parse((string)result[4]!, CultureInfo.InvariantCulture))
+                throw new InvalidDataException($"Invalid scheduled metadata for '{job.Id}'.");
+            return PromotionResult.LostRace;
+        }
+        throw new InvalidDataException("Redis did not confirm promotion.");
     }
 
     public async Task<JobCandidate?> PeekAsync()
@@ -143,12 +257,7 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
             throw new InvalidDataException($"Non-enqueued ready job '{job.Id}'.");
         }
         var cycle = fields.GetValueOrDefault("cycle", "0");
-        if (!long.TryParse(cycle, NumberStyles.None, CultureInfo.InvariantCulture, out var cycleNumber) || cycleNumber < 0 ||
-            cycle != cycleNumber.ToString(CultureInfo.InvariantCulture) || job.Attempts >= job.MaxAttempts ||
-            job.AttemptHistory.Any(a => a.FinishedAt is null) ||
-            (job.Attempts == 0 ? cycle == "0" && job.AttemptHistory.Count != 0 :
-                job.AttemptHistory.Count == 0 || job.AttemptHistory[^1].Attempt != job.Attempts))
-            throw new InvalidDataException($"Invalid claim metadata for '{job.Id}'.");
+        ValidateManagement(job, fields);
         return new JobCandidate(job, snapshot, cycle, head[0].Score);
     }
 

@@ -405,7 +405,7 @@ public sealed partial class ProcessingTests
 {
     [Theory]
     [InlineData(false)] [InlineData(true)]
-    public async Task Promotion_receipt_does_not_hide_corrupted_payload_or_indexes(bool indexes)
+    public async Task Promotion_progress_proof_does_not_hide_corrupted_payload_or_indexes(bool indexes)
     {
         var candidate = await Scheduled();
         await store.TryPromoteAsync(candidate, now.AddSeconds(1));

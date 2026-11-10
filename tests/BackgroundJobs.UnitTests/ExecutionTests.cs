@@ -87,7 +87,7 @@ public sealed class ExecutionTests
             foreach (var reference in References) yield return reference;
         }
         public Task<bool> HasProcessingAsync() => Task.FromResult(Residual);
-        public Task<IReadOnlyList<ScheduledCandidate>> ReadScheduledAsync(DateTimeOffset now, long offset) => Task.FromResult<IReadOnlyList<ScheduledCandidate>>([]);
+        public Task<ScheduledBatch> ReadScheduledAsync(DateTimeOffset now, long offset) => Task.FromResult(new ScheduledBatch([]));
         public Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now) => throw new NotSupportedException();
         public Task<JobCandidate?> PeekAsync()
         {

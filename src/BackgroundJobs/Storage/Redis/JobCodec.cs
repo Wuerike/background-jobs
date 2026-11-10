@@ -43,6 +43,22 @@ internal static class JobCodec
         return number;
     }
 
+    internal static JobSummary ReadSummary(string id, RedisValue[] fields)
+    {
+        if (fields.Length != 4 || fields.Any(v => v.IsNull) || (string)fields[0]! != id ||
+            string.IsNullOrWhiteSpace((string)fields[1]!))
+            throw new InvalidDataException($"Invalid indexed job '{id}'.");
+        return new JobSummary(id, (string)fields[1]!, State((string)fields[2]!), Number((string)fields[3]!, 0, 10));
+    }
+
+    internal static long Cycle(string value)
+    {
+        if (!long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var cycle) || cycle < 0 ||
+            value != cycle.ToString(CultureInfo.InvariantCulture))
+            throw new InvalidDataException("Invalid job cycle.");
+        return cycle;
+    }
+
     internal static JobDetails Read(string id, RedisResult[] snapshot)
     {
         string field = "snapshot";

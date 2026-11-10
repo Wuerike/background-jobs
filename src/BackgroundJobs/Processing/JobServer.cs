@@ -132,8 +132,8 @@ public sealed class JobServer : IAsyncDisposable
             await promotion.ConfigureAwait(false);
             removed++;
         }
-        return (offset + candidates.Count - removed,
-            candidates.Count == RedisJobStore.ScheduledBatchSize || removed > 0);
+        return (candidates.ExaminedCount != candidates.Count ? 0 : offset + candidates.Count - removed,
+            candidates.ExaminedCount == RedisJobStore.ScheduledBatchSize || removed > 0);
     }
 
     private async Task ScheduleAsync()

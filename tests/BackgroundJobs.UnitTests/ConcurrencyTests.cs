@@ -46,10 +46,10 @@ public sealed partial class ConcurrencyTests
             await Task.CompletedTask;
             foreach (var reference in References) yield return reference;
         }
-        public Task<IReadOnlyList<ScheduledCandidate>> ReadScheduledAsync(DateTimeOffset now, long offset)
+        public async Task<ScheduledBatch> ReadScheduledAsync(DateTimeOffset now, long offset)
         {
             Interlocked.Increment(ref Selections);
-            return SelectScheduled?.Invoke(now, offset) ?? Task.FromResult<IReadOnlyList<ScheduledCandidate>>([]);
+            return new ScheduledBatch((await (SelectScheduled?.Invoke(now, offset) ?? Task.FromResult<IReadOnlyList<ScheduledCandidate>>([]))).ToList());
         }
         public Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now)
         {
