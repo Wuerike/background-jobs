@@ -79,7 +79,7 @@ public sealed class ExecutionHttpTests
         JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.Clone();
 
     [Fact]
-    public async Task Acceptance_success_terminal_failure_continuity_retry_pending_and_real_start_latency()
+    public async Task Acceptance_success_terminal_failure_continuity_retry_and_real_start_latency()
     {
         await using var host = new Host(); await host.Start();
         using var health = await host.Http.GetAsync("/health");
@@ -106,13 +106,16 @@ public sealed class ExecutionHttpTests
         var retry = await host.WaitState(retryId, "scheduled");
         Assert.Equal(1, retry.GetProperty("attempts").GetInt32());
         Assert.Equal(retry.GetProperty("attemptHistory")[0].GetProperty("finishedAt").GetDateTimeOffset().AddMilliseconds(500), retry.GetProperty("scheduledAt").GetDateTimeOffset());
+        var retried = await host.WaitState(retryId, "succeeded");
+        Assert.Equal(2, retried.GetProperty("attempts").GetInt32());
+        Assert.Equal(JsonValueKind.Null, retried.GetProperty("scheduledAt").ValueKind);
         using var response = await host.Http.GetAsync("/demo/events");
         var events = (await Body(response)).GetProperty("items").EnumerateArray().ToArray();
-        Assert.Equal(9, events.Length);
+        Assert.Equal(11, events.Length);
         foreach (var e in events)
         {
             Assert.Equal(new[] { "at", "attempt", "detail", "jobId", "type" }, e.EnumerateObject().Select(p => p.Name).Order());
-            Assert.Equal(1, e.GetProperty("attempt").GetInt32());
+            Assert.InRange(e.GetProperty("attempt").GetInt32(), 1, 2);
             Assert.Equal(TimeSpan.Zero, e.GetProperty("at").GetDateTimeOffset().Offset);
         }
         Assert.Equal(new[] { "started", "finished" }, events.Where(e => e.GetProperty("jobId").GetString() == successId).Select(e => e.GetProperty("type").GetString()));
@@ -171,8 +174,9 @@ public sealed class ExecutionHttpTests
         Assert.Equal(0, await host.Connection.GetDatabase().SetLengthAsync(host.Prefix + ":jobs"));
     }
 
-    [Fact]
-    public async Task Events_are_isolated_per_host_and_fatal_storage_errors_remove_health()
+    [Theory]
+    [InlineData("ready")] [InlineData("scheduled")]
+    public async Task Events_are_isolated_per_host_and_fatal_storage_errors_remove_health(string index)
     {
         await using var first = new Host(); await first.Start();
         await using var second = new Host(); await second.Start();
@@ -181,7 +185,7 @@ public sealed class ExecutionHttpTests
         using var empty = await second.Http.GetAsync("/demo/events");
         Assert.Empty((await Body(empty)).GetProperty("items").EnumerateArray());
         // An invalid queue type forces a real polling infrastructure failure.
-        await first.Connection.GetDatabase().StringSetAsync(first.Prefix + ":ready", "invalid");
+        await first.Connection.GetDatabase().StringSetAsync(first.Prefix + ":" + index, "invalid");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         while (first.Server.LastError is null) await Task.Delay(10, timeout.Token);
         using var health = await first.Http.GetAsync("/health");

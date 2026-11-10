@@ -87,6 +87,8 @@ public sealed class ExecutionTests
             foreach (var reference in References) yield return reference;
         }
         public Task<bool> HasProcessingAsync() => Task.FromResult(Residual);
+        public Task<IReadOnlyList<ScheduledCandidate>> ReadScheduledAsync(DateTimeOffset now, long offset) => Task.FromResult<IReadOnlyList<ScheduledCandidate>>([]);
+        public Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now) => throw new NotSupportedException();
         public Task<JobCandidate?> PeekAsync()
         {
             lock (Calls) Calls.Add("peek");
@@ -117,7 +119,7 @@ public sealed class ExecutionTests
     {
         var at = DateTimeOffset.UtcNow.AddSeconds(-1);
         return new(new JobDetails(id, name, JsonDocument.Parse(json).RootElement, JobState.Enqueued, 0, 1, 0, null, at, at,
-            [new(JobState.Enqueued, at, "created")], []), "snapshot", "0");
+            [new(JobState.Enqueued, at, "created")], []), "snapshot", "0", 1);
     }
 
     [Theory]
@@ -247,15 +249,14 @@ public sealed class ExecutionTests
     {
         private readonly DateTimeOffset now = new(2026, 11, 10, 0, 0, 0, TimeSpan.Zero);
         public TimeSpan? Due { get; private set; }
-        private TimerCallback? callback;
-        private object? state;
+        private readonly List<(TimerCallback Callback, object? State)> callbacks = [];
         public override DateTimeOffset GetUtcNow() => now;
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
-            this.callback = callback; this.state = state; Due = dueTime;
+            lock (callbacks) { callbacks.Add((callback, state)); Due = dueTime; }
             return new ManualTimer();
         }
-        public void Fire() => callback!(state);
+        public void Fire() { lock (callbacks) { foreach (var (callback, state) in callbacks.ToArray()) callback(state); callbacks.Clear(); } }
         private sealed class ManualTimer : ITimer
         {
             public bool Change(TimeSpan dueTime, TimeSpan period) => true;

@@ -85,10 +85,11 @@ public sealed class JobServer : IAsyncDisposable
             }
             if (missing.Count > 0) throw new InvalidOperationException("Handlers ausentes: " + string.Join(", ", missing));
             if (residual) throw new InvalidOperationException("Há jobs em processamento que exigem recuperação; o servidor não pode iniciar.");
+            await PromoteBatchAsync(0).ConfigureAwait(false);
             Task[] workers;
             lock (admission)
             {
-                workers = stopping.IsCancellationRequested ? [] : Enumerable.Range(0, workerCount).Select(_ => Task.Run(WorkAsync)).ToArray();
+                workers = stopping.IsCancellationRequested ? [] : Enumerable.Range(0, workerCount).Select(_ => Task.Run(WorkAsync)).Append(Task.Run(ScheduleAsync)).ToArray();
                 available = !stopping.IsCancellationRequested;
                 initialized.TrySetResult();
             }
@@ -110,6 +111,47 @@ public sealed class JobServer : IAsyncDisposable
             available = false;
             stopping.Cancel();
         }
+    }
+
+    private async Task<(long Offset, bool Continue)> PromoteBatchAsync(long offset)
+    {
+        lock (admission) { if (stopping.IsCancellationRequested) return (0, false); }
+        var now = clock.GetUtcNow();
+        var candidates = await store.ReadScheduledAsync(now, offset).ConfigureAwait(false);
+        var removed = 0;
+        foreach (var candidate in candidates)
+        {
+            if (candidate.Job.ScheduledAt > now) continue;
+            Task<PromotionResult> promotion;
+            lock (admission)
+            {
+                if (stopping.IsCancellationRequested) return (0, false);
+                try { promotion = store.TryPromoteAsync(candidate, now); }
+                catch (Exception failure) { Fail(failure); throw; }
+            }
+            await promotion.ConfigureAwait(false);
+            removed++;
+        }
+        return (offset + candidates.Count - removed,
+            candidates.Count == RedisJobStore.ScheduledBatchSize || removed > 0);
+    }
+
+    private async Task ScheduleAsync()
+    {
+        try
+        {
+            long offset = 0;
+            while (true)
+            {
+                lock (admission) { if (stopping.IsCancellationRequested) break; }
+                var batch = await PromoteBatchAsync(offset).ConfigureAwait(false);
+                if (batch.Continue) { offset = batch.Offset; continue; }
+                offset = 0;
+                try { await Task.Delay(TimeSpan.FromMilliseconds(100), clock, stopping.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
+            }
+        }
+        catch (Exception failure) { Fail(failure); }
     }
 
     private async Task WorkAsync()

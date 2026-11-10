@@ -4,7 +4,7 @@
 
 Este documento registra a arquitetura baseada na [especificação funcional](spec-base.md), distinguindo o código disponível dos componentes planejados.
 
-A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados registro tipado, criação e consulta, reserva e conclusão atômicas e execução imediata com quantidade configurável de workers, padrão 4. `JobServer` oferece inicialização, disponibilidade e parada; `JobServerHostedService` o integra ao host. A demo executa os três jobs da spec e expõe criação, detalhe, eventos e health. Promoção de agendamentos, execução de retries, gerenciamento e recuperação permanecem planejados.
+A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados registro tipado, criação e consulta, reserva e conclusão atômicas e execução imediata com quantidade configurável de workers, padrão 4. `JobServer` oferece inicialização, disponibilidade e parada; `JobServerHostedService` o integra ao host. A demo executa os três jobs da spec e expõe criação, detalhe, eventos e health. Agendamentos e retries são promovidos e executados pela biblioteca. Gerenciamento e recuperação permanecem planejados.
 
 A entrega prevista é uma biblioteca com motor próprio de processamento e uma aplicação demonstrativa. A biblioteca executa as funções dentro do processo da aplicação consumidora; Redis é o serviço externo de armazenamento.
 
@@ -43,7 +43,7 @@ Há um único processo executor por armazenamento, conforme a spec. Não é nece
 
 ## 3. Organização da solução
 
-Há dois projetos de produção e três de testes. A organização por pastas separa responsabilidades sem exigir um assembly para cada camada. Scheduler e recuperação são componentes planejados.
+Há dois projetos de produção e três de testes. A organização por pastas separa responsabilidades sem exigir um assembly para cada camada. O scheduler integra `JobServer`; recuperação permanece planejada.
 
 ```text
 src/
@@ -76,7 +76,7 @@ tests/
 - Abstrações de hosting, injeção de dependências e logging de `Microsoft.Extensions`.
 - `TimeProvider` para abstrair o relógio nos componentes que dependem de tempo.
 
-O motor é implementado no projeto; promoção de agendamentos e execução de retry ainda estão planejadas. Bibliotecas prontas de processamento de jobs não assumem essas funções.
+O motor de processamento, agendamento e retry é implementado no projeto. Bibliotecas prontas de processamento de jobs não assumem essas funções.
 
 ### 3.2 Limites de responsabilidade
 
@@ -100,7 +100,7 @@ A demo valida os parâmetros específicos das suas funções no contrato HTTP. O
 | `IJobStore` | Definir operações persistentes com semântica de domínio. |
 | `RedisJobStore` | Implementar o armazenamento e as operações atômicas. |
 
-Os contratos internos de armazenamento expressam operações de domínio: criação, consulta, reserva e conclusão disponíveis, com promoção, deleção, reenfileiramento e recuperação planejadas. Um repositório CRUD genérico não expressa os requisitos de consistência entre job, índices, tentativa e histórico.
+Os contratos internos de armazenamento expressam operações de domínio: criação, consulta, promoção, reserva e conclusão disponíveis, com deleção, reenfileiramento e recuperação planejadas. Um repositório CRUD genérico não expressa os requisitos de consistência entre job, índices, tentativa e histórico.
 
 O armazenamento persiste um descritor da chamada: identificador estável do contrato e argumentos JSON. Delegates e instâncias de serviços são registrados novamente pela aplicação a cada inicialização. Nomes desconhecidos devem resultar em erro explícito; jobs persistidos nunca são descartados por ausência de registro. A inicialização confere a disponibilidade dos handlers referenciados pelos jobs armazenados, inclusive finalizados que podem ser reenfileirados, antes de liberar o processamento.
 
@@ -167,13 +167,13 @@ O conteúdo Unicode bem formado é preservado sem normalização. Um conversor i
 
 `JobOptions` é imutável após inicialização: `MaxAttempts` tem padrão 3 e faixa 1–10; `RetryDelayMs`, padrão 1000 e faixa 0–60000; `RunAt` é `DateTimeOffset?`. Opções nulas na API C# equivalem aos padrões. Após validar, uma única leitura de `TimeProvider` define `createdAt`, `updatedAt`, histórico inicial e comparação temporal. Horário futuro produz `scheduled` e `scheduledAt` UTC, preservando ticks; ausência, passado ou igualdade produzem `enqueued` e `scheduledAt = null`. O pedido preparado tem zero tentativas e histórico de tentativas vazio. O cliente associa um ID ao snapshot preparado e aguarda confirmação do armazenamento. A escrita reconhece repetições equivalentes pelo ID e identidade imutável; não há loop próprio de retransmissão ou reconciliação de rede.
 
-`IJobStore` oferece criação e consulta. `IProcessingStore` define `ReadReferencesAsync`, `HasProcessingAsync`, `PeekAsync`, `TryClaimAsync` e `CompleteAsync`; `RedisJobStore` implementa ambos. A separação permite controlar o processamento em testes sem implementar operações de criação sem uso naquele cenário.
+`IJobStore` oferece criação e consulta. `IProcessingStore` define `ReadReferencesAsync`, `HasProcessingAsync`, `ReadScheduledAsync`, `TryPromoteAsync`, `PeekAsync`, `TryClaimAsync` e `CompleteAsync`; `RedisJobStore` implementa ambos. A separação permite controlar o processamento em testes sem implementar operações de criação sem uso naquele cenário.
 
-`JobCandidate` reúne o detalhe materializado, o snapshot exato do hash e listas e o ciclo interno. `ClaimedJob` reúne os argumentos conferidos, número, ciclo, token e início confirmados. `AttemptCompletion` captura o fim e o erro uma vez; erro nulo significa sucesso. O worker reconstrói os argumentos persistidos, sem reutilizar objetos do produtor.
+`JobCandidate` reúne o detalhe materializado, o snapshot exato do hash e listas, o ciclo interno e a posição FIFO capturada junto do ID da cabeça. `ClaimedJob` reúne os argumentos conferidos, número, ciclo, token e início confirmados. `AttemptCompletion` captura o fim e o erro uma vez; erro nulo significa sucesso. O worker reconstrói os argumentos persistidos, sem reutilizar objetos do produtor.
 
-Promoção, deleção, reenfileiramento e recuperação são operações planejadas, ainda não disponíveis no armazenamento.
+Deleção, reenfileiramento e recuperação são operações planejadas, ainda não disponíveis no armazenamento.
 
-A promoção por scheduler permanece planejada. O worker confere o handler pelo nome antes da reserva e chama `JobHandlers.InvokeAsync` somente após a confirmação. O registro genérico constrói o adaptador com o conhecimento do tipo concreto dos argumentos:
+O worker confere o handler pelo nome antes da reserva e chama `JobHandlers.InvokeAsync` somente após a confirmação. O registro genérico constrói o adaptador com o conhecimento do tipo concreto dos argumentos:
 
 ```text
 Registro pelo identificador do contrato
@@ -302,7 +302,7 @@ Para o prefixo `p`, a representação persistida é:
 | `p:sequence` | Contador incrementado somente para entrada em `ready`. |
 | `p:processing` | Set de IDs com tentativa aberta confirmada. |
 
-Datas no hash e nos históricos usam formato `O` em UTC e cultura invariável, preservando ticks. Estados e resultados são textos minúsculos da spec. O score agendado nunca antecipa a data exata; no extremo superior de `DateTimeOffset`, pode representar o milissegundo seguinte ao último instante representável. A promoção planejada deverá comparar scores no mesmo domínio temporal, sem reconstruir o instante arredondado como `DateTimeOffset`.
+Datas no hash e nos históricos usam formato `O` em UTC e cultura invariável, preservando ticks. Estados e resultados são textos minúsculos da spec. O score agendado nunca antecipa a data exata; no extremo superior de `DateTimeOffset`, pode representar o milissegundo seguinte ao último instante representável. A seleção compara scores no mesmo domínio temporal, sem reconstruir o instante arredondado como `DateTimeOffset`, e confere a data exata antes de promover.
 
 A identidade de criação é SHA-256 de um array JSON determinístico dos dados originais, incluindo ID, opções, datas, argumentos e histórico inicial. A criação equivalente já confirmada retorna sem atualizar estado, fila, datas ou histórico; identidade diferente com mesmo ID falha. Chamadas públicas independentes recebem IDs próprios. A reconciliação após confirmação ambígua de infraestrutura ainda não está implementada.
 
@@ -316,9 +316,11 @@ A leitura reconhece todos os estados, resultados de tentativa, tentativas aberta
 
 A reserva acrescenta `cycle` (inicialmente `0`, inclusive para registros sem esse campo), `attemptToken` (GUID opaco) e `attemptIndex` (posição na lista preservada). A conclusão mantém esses campos e grava `completionIdentity`, SHA-256 do resultado capturado com ID, ciclo, token, tentativa fechada e transição. Reenvio do mesmo resultado confirma sem alterar datas, listas ou índices; outro token, ciclo ou resultado é rejeitado.
 
-`PeekAsync` lê a cabeça de `ready` sem remover, materializa o detalhe e confere metadados. O script de reserva verifica novamente a cabeça e compara integralmente hash e listas com o snapshot conferido. Assim, o handler recebe os argumentos correspondentes à reserva, mesmo com concorrência entre leitura e escrita. Um candidato perdido retorna sem escrever; precondição inválida gera erro explícito.
+`PeekAsync` lê a cabeça e seu score em uma única operação sem remover, materializa o detalhe e confere metadados. Uma reentrada com nova posição durante essa leitura descarta o candidato antigo. O script de reserva verifica novamente a cabeça e compara integralmente hash e listas com o snapshot conferido. Assim, o handler recebe os argumentos correspondentes à reserva, mesmo com concorrência entre leitura e escrita. Um candidato perdido retorna sem escrever; precondição inválida gera erro explícito.
 
 `processing-common.lua` concentra verificações de tipos e snapshots. Reserva e conclusão verificam a participação exclusiva nos índices, estado, orçamento e metadados antes da primeira escrita. A reserva também confere a posição FIFO e o contador. A conclusão confere a tentativa aberta, calcula o instante de retry em C# com precisão de ticks e rejeita overflow antes da escrita. Não há TTL.
+
+`ScheduledCandidate` mantém detalhe, snapshot e score conferidos na seleção. A promoção valida a ausência de tentativa aberta e orçamento disponível, e usa `promote.lua` para confirmar o snapshot e os índices antes de escrever. Cada promoção recebe sequência nova, incluindo retry: jobs já em `ready` permanecem à frente. `promotionIdentity` identifica por SHA-256 o snapshot promovido, permitindo distinguir uma promoção concorrente comprovada de adulteração; sua confirmação perdida não é reenviada automaticamente. A promoção mantém os metadados de conclusão, permitindo confirmar o mesmo resultado até a próxima reserva, que invalida a conclusão anterior.
 
 O snapshot completo é limitado a um job, não a uma varredura global. Históricos sem retenção crescem por exigência do domínio; sua leitura tem custo proporcional ao histórico daquele job.
 
@@ -357,7 +359,7 @@ Toda mudança de estado atualiza, na mesma operação atômica, os índices afet
 
 Lua é usado porque uma operação de domínio envolve várias estruturas Redis e verificações condicionais. Na criação, verificar a existência do ID, gravar o job e seu histórico e inseri-lo nos índices precisam ocorrer sem intercalamento de outros comandos. Chamadas separadas poderiam permitir que outra operação observasse dados incompletos ou alterasse uma condição entre sua verificação e a escrita. O mesmo princípio permite consultar estado, contador e históricos de um único momento.
 
-O gerador da biblioteca produz os IDs. O script de criação protege a verificação e a gravação do mesmo ID contra concorrência: rejeita pedidos com identidade diferente e reconhece repetições equivalentes sem duplicar histórico ou posição na fila. Essa garantia é restrita ao mesmo ID e à mesma identidade de criação. Chamadas públicas independentes geram IDs próprios; a execução dos handlers segue a garantia at-least-once da spec. A operação de reserva da seção 7.1 garante exclusividade; a execução com múltiplos loops ainda está planejada.
+O gerador da biblioteca produz os IDs. O script de criação protege a verificação e a gravação do mesmo ID contra concorrência: rejeita pedidos com identidade diferente e reconhece repetições equivalentes sem duplicar histórico ou posição na fila. Essa garantia é restrita ao mesmo ID e à mesma identidade de criação. Chamadas públicas independentes geram IDs próprios; a execução dos handlers segue a garantia at-least-once da spec. A operação de reserva da seção 7.1 garante exclusividade; a execução usa N loops de workers e um loop independente de scheduler.
 
 As operações implementadas são:
 
@@ -365,6 +367,7 @@ As operações implementadas são:
 | --- | --- |
 | [`create.lua`](../src/BackgroundJobs/Storage/Redis/create.lua) | Verifica as precondições e cria hash, histórico inicial, índice geral e participação exclusiva em `ready` ou `scheduled`; para `ready`, atribui uma sequência FIFO na mesma execução. Repetição equivalente confirma sem novas escritas. |
 | [`get.lua`](../src/BackgroundJobs/Storage/Redis/get.lua) | Lê hash, histórico e tentativas em um snapshot consistente, sem misturar momentos distintos. Distingue ausência de resíduos locais; a materialização C# valida o conteúdo. |
+| [`promote.lua`](../src/BackgroundJobs/Storage/Redis/promote.lua) | Confere snapshot, elegibilidade, tipos, índices, orçamento e sequência antes de retirar de `scheduled`, atribuir nova posição em `ready`, limpar `scheduledAt` e acrescentar histórico; preserva tentativas e identidade de conclusão. |
 | [`claim.lua`](../src/BackgroundJobs/Storage/Redis/claim.lua) | Confere cabeça, snapshot e índices; retira de `ready`, inclui em `processing`, abre tentativa e registra a transição. |
 | [`complete.lua`](../src/BackgroundJobs/Storage/Redis/complete.lua) | Fecha tentativa, remove de `processing`, persiste sucesso, falha terminal ou agendamento de retry; confirma reenvios equivalentes. |
 
@@ -383,7 +386,7 @@ A leitura de um candidato não autoriza sua execução. `TryClaimAsync` confirma
 3. O incremento de `attempts` e a criação da tentativa aberta com seu token.
 4. A mudança para `processing` e a inclusão do histórico.
 
-Se outro worker tiver assumido o candidato, a operação não altera dados e o worker busca outro. A função só é invocada após a confirmação da reserva.
+A leitura da cabeça captura ID e score na mesma resposta. Antes de comparar o snapshot, a reserva confere essa geração da fila: se o mesmo ID tiver voltado por retry com uma nova posição, o candidato antigo perde sem escrita ou consumo de tentativa. Posição inválida e alterações no snapshot da mesma entrada continuam sendo erros. Se outro worker tiver assumido o candidato, a operação não altera dados e o worker busca outro. A função só é invocada após a confirmação da reserva.
 
 ### 7.2 Disputa entre deleção e execução
 
@@ -400,7 +403,7 @@ As consultas de detalhe obtêm uma visão consistente entre estado, contador, hi
 
 ## 8. Processamento, FIFO e agendamento
 
-`JobServer` mantém uma tarefa coordenadora e N loops de execução, com quantidade fixa durante sua vida. Cada loop assume um job, aguarda a função terminar e confirma sua conclusão antes de buscar outro. O parâmetro público `int workerCount = 4` vem depois de `prefix` e `timeProvider`, preservando argumentos posicionais existentes. Valores menores que 1 são rejeitados antes do acesso ao armazenamento. A conexão pertence ao chamador.
+`JobServer` mantém uma tarefa coordenadora, um loop de scheduler e N loops de execução, com quantidade fixa durante sua vida. Cada loop assume um job, aguarda a função terminar e confirma sua conclusão antes de buscar outro. O parâmetro público `int workerCount = 4` vem depois de `prefix` e `timeProvider`, preservando argumentos posicionais existentes. Valores menores que 1 são rejeitados antes do acesso ao armazenamento. A conexão pertence ao chamador.
 
 As verificações iniciais acontecem uma vez. Os N loops são agendados independentemente por `Task.Run`, permitindo que o trecho síncrono de uma função não impeça a instalação dos demais. A prontidão é publicada sob a mesma barreira usada na admissão e na falha fatal, depois de instalar todos os loops, se não houver pedido de parada. `StartAsync` compartilha essa inicialização entre chamadas repetidas. `StopAsync` é idempotente; uma instância parada não é reiniciada, exigindo uma nova instância para outro ciclo de serviço.
 
@@ -410,11 +413,11 @@ Não reservar antecipadamente jobs para uma fila local em memória. Essa decisã
 
 Com um worker, a sequência crescente de entrada em `ready` define FIFO. Com vários workers, as reservas são exclusivas, mas não há garantia de ordem exata de início ou término das funções. O limite de N funções simultâneas decorre da quantidade de loops, cada um com uma única tentativa em andamento. A exclusividade por job decorre da reserva atômica Lua; Redis não controla a quantidade de funções executadas no processo.
 
-O scheduler planejado verificará agendamentos a cada **100 ms** e promoverá vencidos para `ready`, acrescentando o histórico de `enqueued`. Até essa integração, jobs `scheduled` permanecem pendentes, inclusive retries com atraso zero.
+O scheduler consulta o índice `scheduled` em páginas de até **128 candidatos**, limitadas pelo score do instante observado. Confere `scheduledAt <= now` com precisão de ticks; o score arredondado é apenas um filtro. Candidatos futuros na mesma faixa não escondem os elegíveis: o cursor avança pelos não removidos e reinicia após o fim da seleção. Havendo progresso, continua drenando páginas; ao terminar, espera **100 ms** com `TimeProvider` e sinal de parada. Não invoca funções, não ocupa worker, não mantém fila local e não sobrepõe suas rodadas.
 
 Um job só pode ser promovido quando seu horário de elegibilidade tiver sido atingido. Um `runAt` passado resulta diretamente em `enqueued`. Retry com atraso zero segue a transição por `scheduled`, ficando imediatamente elegível.
 
-O objetivo é atender ao início em até dois segundos no ambiente local sem sobrecarga. O intervalo de polling é uma decisão inicial que precisa ser validada pelos testes de aceite; não representa uma garantia de tempo real.
+O objetivo é atender ao início em até dois segundos no ambiente local sem sobrecarga. Os testes HTTP com composição real verificam o intervalo de polling e a latência; não representa uma garantia de tempo real.
 
 Usar UTC nas comparações e um `TimeProvider` injetável para testar elegibilidade e atrasos sem esperas reais em testes unitários.
 
@@ -434,15 +437,15 @@ Exceções dos handlers ficam restritas às respectivas tentativas e não encerr
 
 ### 9.1 Falhas de infraestrutura
 
-Uma falha de acesso ao Redis observada por qualquer worker fecha imediatamente a admissão de todo o servidor sob a barreira compartilhada, torna `IsAvailable` falso e cancela as esperas ociosas dos irmãos. `LastError` preserva a primeira falha, mesmo se outras operações admitidas também falharem. A tarefa coordenadora aguarda todos os loops; a detecção da falha não depende dessa espera agregada. Reservas admitidas antes do fechamento continuam sendo aguardadas: se confirmadas, as funções executam e suas conclusões são tentadas. Sem reserva confirmada, o handler não é invocado; uma falha na conclusão não reinvoca a função nem libera outra busca. Erros de Redis não são registrados como falha do handler. Essa política mantém o processamento suspenso quando o resultado persistido é incerto.
+Uma falha de leitura ou escrita Redis observada por qualquer worker ou pelo scheduler fecha imediatamente a admissão de todo o servidor sob a barreira compartilhada, torna `IsAvailable` falso e cancela as esperas ociosas dos irmãos. `LastError` preserva a primeira falha, mesmo se outras operações admitidas também falharem. A tarefa coordenadora aguarda todos os loops; a detecção da falha não depende dessa espera agregada. Reservas admitidas antes do fechamento continuam sendo aguardadas: se confirmadas, as funções executam e suas conclusões são tentadas. Sem reserva confirmada, o handler não é invocado; uma falha na conclusão não reinvoca a função nem libera outra busca. Erros de Redis não são registrados como falha do handler. Essa política mantém o processamento suspenso quando o resultado persistido é incerto.
 
 Reenvios equivalentes de criação e conclusão são reconhecidos pelo armazenamento. Não há loop automático de retransmissão, reconciliação ou retomada; esses comportamentos ainda estão planejados. A reconciliação deverá consultar o resultado persistido usando a identidade da operação, sem repetir a função por falha de confirmação. Chamadas públicas independentes de criação continuam gerando IDs distintos.
 
 ## 10. Inicialização e recuperação
 
-A inicialização disponível verifica acesso ao armazenamento, percorre referências de todos os jobs em páginas de `SSCAN` e confere handlers, inclusive de finalizados. O diagnóstico identifica nomes e IDs ausentes, sem consumir tentativas. Também verifica o índice `processing` e os estados persistidos: resíduos impedem prontidão com diagnóstico de recuperação necessária. Registros sem ciclo/token são aceitos sem migração, com ciclo inicial `0` e token atribuído na reserva. Depois das verificações, o servidor instala os N loops e publica prontidão somente se não houver parada ou falha. Parar durante a verificação impede a liberação dos workers e aguarda a inicialização terminar. Um handler ausente encontrado após a inicialização também impede reserva e torna o servidor indisponível.
+A inicialização disponível verifica acesso ao armazenamento, percorre referências de todos os jobs em páginas de `SSCAN` e confere handlers, inclusive de finalizados. O diagnóstico identifica nomes e IDs ausentes, sem consumir tentativas. Também verifica o índice `processing` e os estados persistidos: resíduos impedem prontidão com diagnóstico de recuperação necessária. Registros sem ciclo/token são aceitos sem migração, com ciclo inicial `0` e token atribuído na reserva. Depois das verificações, o servidor promove uma página limitada de vencidos, instala o scheduler e os N loops e publica prontidão somente se não houver parada ou falha. O scheduler continua os lotes restantes sem esperar futuros vencerem. Parar durante a verificação impede a liberação dos workers e aguarda a inicialização terminar. Um handler ausente encontrado após a inicialização também impede reserva e torna o servidor indisponível.
 
-A sequência completa planejada, com scheduler e recuperação, é:
+A sequência completa com recuperação ainda planejada é:
 
 1. Validar configuração, registros de funções e ausência de identificadores duplicados.
 2. Conectar ao Redis e preparar o armazenamento e os scripts.
@@ -467,14 +470,14 @@ A garantia é **at-least-once, sujeita ao limite de tentativas**. Uma função p
 
 A parada segue esta ordem:
 
-1. Fechar a admissão de novas reservas e marcar o servidor como indisponível.
+1. Fechar a admissão de novas reservas e promoções e marcar o servidor como indisponível.
 2. Interromper as esperas por trabalho.
-3. Aguardar todos os loops, incluindo reservas admitidas ainda sem resposta e funções em execução.
+3. Aguardar inicialização, scheduler e workers, incluindo leituras, promoções e reservas admitidas ainda sem resposta e funções em execução.
 4. Confirmar suas conclusões antes de liberar recursos; falhas de confirmação mantêm diagnóstico fatal.
 
-A reserva e a entrada em parada usam uma barreira comum para impedir que um job pendente seja assumido durante a transição. Não há cancelamento público de funções em execução.
+Reservas, promoções e a entrada em parada usam uma barreira comum para impedir que um job pendente seja assumido durante a transição. Não há cancelamento público de funções em execução.
 
-`JobServerHostedService` adapta o ciclo a `IHostedService`. O sinal compartilhado é descartado somente depois do término de todos os loops. O sinal de parada interrompe somente a busca e a espera ociosa; nenhuma função recebe cancelamento. Uma reserva admitida antes da parada, mesmo sem resposta Redis ainda, integra o trabalho aguardado. O adaptador aguarda mesmo com token do host expirado e a demo configura `HostOptions.ShutdownTimeout = Timeout.InfiniteTimeSpan`. Referência: [hosted services no ASP.NET Core](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/host/hosted-services?view=aspnetcore-10.0).
+`JobServerHostedService` adapta o ciclo a `IHostedService`. O sinal compartilhado é descartado somente depois do término de todos os loops. O sinal de parada interrompe somente a busca e a espera ociosa; nenhuma função recebe cancelamento. Uma reserva ou promoção admitida antes da parada, mesmo sem resposta Redis ainda, integra o trabalho aguardado. O adaptador aguarda mesmo com token do host expirado e a demo configura `HostOptions.ShutdownTimeout = Timeout.InfiniteTimeSpan`. Referência: [hosted services no ASP.NET Core](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/host/hosted-services?view=aspnetcore-10.0).
 
 Se houver encerramento forçado, a inicialização disponível recusa resíduos de `processing`. Sua recuperação automática ainda não está implementada e a comprovação em processos separados está pendente.
 

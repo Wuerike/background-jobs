@@ -13,6 +13,8 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
     private static readonly string GetScript = LoadScript("get");
     private static readonly string ClaimScript = LoadScript("processing-common") + "\n" + LoadScript("claim");
     private static readonly string CompleteScript = LoadScript("processing-common") + "\n" + LoadScript("complete");
+    private static readonly string PromoteScript = LoadScript("processing-common") + "\n" + LoadScript("promote");
+    internal const int ScheduledBatchSize = 128;
     private readonly IDatabase database;
     private readonly string prefix;
 
@@ -87,11 +89,53 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         return (job, JsonSerializer.Serialize(lists), fields);
     }
 
+    public async Task<IReadOnlyList<ScheduledCandidate>> ReadScheduledAsync(DateTimeOffset now, long offset)
+    {
+        var entries = await database.SortedSetRangeByScoreWithScoresAsync($"{prefix}:scheduled",
+            double.NegativeInfinity, JobCodec.ScheduledScore(now), skip: offset, take: ScheduledBatchSize).ConfigureAwait(false);
+        var candidates = new List<ScheduledCandidate>(entries.Length);
+        foreach (var entry in entries)
+        {
+            var (job, snapshot, _) = await ReadProcessingSnapshot((string)entry.Element!).ConfigureAwait(false);
+            if (job.State != JobState.Scheduled || job.ScheduledAt is not { } due ||
+                JobCodec.ScheduledScore(due) != entry.Score || job.Attempts >= job.MaxAttempts ||
+                job.AttemptHistory.Any(a => a.FinishedAt is null) ||
+                (job.Attempts == 0 ? job.AttemptHistory.Count != 0 :
+                    job.AttemptHistory.Count == 0 || job.AttemptHistory[^1].Attempt != job.Attempts ||
+                    job.AttemptHistory[^1].Outcome != JobAttemptOutcome.Failed ||
+                    job.AttemptHistory[^1].FinishedAt!.Value.AddMilliseconds(job.RetryDelayMs) != due))
+                throw new InvalidDataException($"Invalid scheduled metadata for '{job.Id}'.");
+            candidates.Add(new(job, snapshot, entry.Score));
+        }
+        return candidates;
+    }
+
+    public async Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now)
+    {
+        var job = candidate.Job;
+        now = now.ToUniversalTime();
+        if (job.State != JobState.Scheduled || job.ScheduledAt is not { } due || due > now ||
+            now < job.UpdatedAt || JobCodec.ScheduledScore(due) != candidate.Score)
+            throw new InvalidDataException("Invalid promotion eligibility.");
+        var history = JsonSerializer.Serialize(new { state = "enqueued", at = JobCodec.DateText(now),
+            reason = job.Attempts == 0 ? "schedule eligible" : "retry eligible" });
+        var result = await database.ScriptEvaluateAsync(PromoteScript, ProcessingKeys(job.Id),
+            [job.Id, candidate.Snapshot, candidate.Score.ToString("R", CultureInfo.InvariantCulture),
+             JobCodec.DateText(due), JobCodec.DateText(now), history, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(candidate.Snapshot)))]).ConfigureAwait(false);
+        return (long)result switch
+        {
+            1 => PromotionResult.Promoted,
+            0 => PromotionResult.LostRace,
+            _ => throw new InvalidDataException("Redis did not confirm promotion.")
+        };
+    }
+
     public async Task<JobCandidate?> PeekAsync()
     {
-        var head = await database.SortedSetRangeByRankAsync($"{prefix}:ready", 0, 0).ConfigureAwait(false);
+        var head = await database.SortedSetRangeByRankWithScoresAsync($"{prefix}:ready", 0, 0).ConfigureAwait(false);
         if (head.Length == 0) return null;
-        var (job, snapshot, fields) = await ReadProcessingSnapshot((string)head[0]!).ConfigureAwait(false);
+        var (job, snapshot, fields) = await ReadProcessingSnapshot((string)head[0].Element!).ConfigureAwait(false);
+        if (await database.SortedSetScoreAsync($"{prefix}:ready", job.Id).ConfigureAwait(false) != head[0].Score) return null;
         // A concurrent winner can move this job between reading the head and snapshot.
         if (job.State != JobState.Enqueued)
         {
@@ -105,7 +149,7 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
             (job.Attempts == 0 ? cycle == "0" && job.AttemptHistory.Count != 0 :
                 job.AttemptHistory.Count == 0 || job.AttemptHistory[^1].Attempt != job.Attempts))
             throw new InvalidDataException($"Invalid claim metadata for '{job.Id}'.");
-        return new JobCandidate(job, snapshot, cycle);
+        return new JobCandidate(job, snapshot, cycle, head[0].Score);
     }
 
     public async Task<ClaimedJob?> TryClaimAsync(JobCandidate candidate, DateTimeOffset startedAt, string token)
@@ -119,7 +163,7 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
             finishedAt = (string?)null, outcome = (string?)null, error = (string?)null });
         var history = JsonSerializer.Serialize(new { state = "processing", at = JobCodec.DateText(startedAt), reason = "execution started" });
         var result = await database.ScriptEvaluateAsync(ClaimScript, ProcessingKeys(job.Id),
-            [job.Id, candidate.Snapshot, candidate.Cycle, token, JobCodec.DateText(startedAt), attempt, history]).ConfigureAwait(false);
+            [job.Id, candidate.Snapshot, candidate.Cycle, token, JobCodec.DateText(startedAt), attempt, history, candidate.Position.ToString("R", CultureInfo.InvariantCulture)]).ConfigureAwait(false);
         return (long)result == 0 ? null : new ClaimedJob(job, number, candidate.Cycle, token, startedAt);
     }
 

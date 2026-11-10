@@ -17,7 +17,7 @@ using StackExchange.Redis.KeyspaceIsolation;
 
 namespace BackgroundJobs.HttpTests;
 
-public sealed class ConcurrencyHttpTests
+public sealed partial class ConcurrencyHttpTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
     public class ConnectionProxy : DispatchProxy

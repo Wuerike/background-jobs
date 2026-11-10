@@ -116,12 +116,14 @@ public sealed partial class ProcessingTests
         await using var server = new JobServer(execution, connection, prefix, workerCount: 2);
         await server.StartAsync();
         await Until(async () => (await Detail("healthy")).State == JobState.Succeeded &&
-            (await Detail("retry")).State == JobState.Scheduled && (await Detail("terminal")).State == JobState.Failed);
+            (await Detail("retry")).State == JobState.Failed && (await Detail("terminal")).State == JobState.Failed);
         await server.StopAsync();
-        await AssertFinished("healthy"); await AssertFinished("terminal", JobState.Failed); await AssertFinished("retry", JobState.Scheduled);
+        await AssertFinished("healthy"); await AssertFinished("terminal", JobState.Failed);
         var retry = await Detail("retry");
-        Assert.Equal(retry.AttemptHistory[0].FinishedAt!.Value.AddMilliseconds(delay), retry.ScheduledAt);
-        Assert.Equal("demo failure", retry.AttemptHistory[0].Error); Assert.Null(server.LastError);
+        Assert.Equal(3, retry.Attempts); Assert.Equal(3, retry.AttemptHistory.Count);
+        Assert.Null(retry.ScheduledAt);
+        for (var i = 1; i < 3; i++) Assert.True(retry.AttemptHistory[i].StartedAt >= retry.AttemptHistory[i-1].FinishedAt!.Value.AddMilliseconds(delay));
+        Assert.All(retry.AttemptHistory, a => Assert.Equal("demo failure", a.Error)); Assert.Null(server.LastError);
     }
 
     // Forward the real Redis interfaces, pausing only the response containing the queue head.
@@ -149,15 +151,15 @@ public sealed partial class ProcessingTests
     {
         await store.CreateAsync(Request("a")); await store.CreateAsync(Request("b"));
         var read = Signal(); var release = Signal(); var paused = 0;
-        async Task<RedisValue[]> Pause(Task<RedisValue[]> response)
+        async Task<SortedSetEntry[]> Pause(Task<SortedSetEntry[]> response)
         {
             var result = await response; read.SetResult(); await release.Task; return result;
         }
         var proxyDb = ForwardingProxy.Create<IDatabase>(db, (proxy, method, args) =>
         {
             var result = proxy.Call(method, args);
-            return method.Name == nameof(IDatabase.SortedSetRangeByRankAsync) && Interlocked.Increment(ref paused) == 1
-                ? Pause((Task<RedisValue[]>)result!) : result;
+            return method.Name == nameof(IDatabase.SortedSetRangeByRankWithScoresAsync) && Interlocked.Increment(ref paused) == 1
+                ? Pause((Task<SortedSetEntry[]>)result!) : result;
         });
         var proxyConnection = ForwardingProxy.Create<IConnectionMultiplexer>(connection, (proxy, method, args) =>
             method.Name == nameof(IConnectionMultiplexer.GetDatabase) ? proxyDb : proxy.Call(method, args));

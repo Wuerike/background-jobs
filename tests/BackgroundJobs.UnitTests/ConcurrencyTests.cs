@@ -6,7 +6,7 @@ using BackgroundJobs.Internal;
 
 namespace BackgroundJobs.UnitTests;
 
-public sealed class ConcurrencyTests
+public sealed partial class ConcurrencyTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
     private sealed record Args(string Message);
@@ -15,7 +15,7 @@ public sealed class ConcurrencyTests
     {
         var now = DateTimeOffset.UtcNow.AddMinutes(-1);
         return new(new(id, "job", JsonDocument.Parse(json).RootElement, JobState.Enqueued, 0, 1, 0,
-            null, now, now, [new(JobState.Enqueued, now, "created")], []), id, "0");
+            null, now, now, [new(JobState.Enqueued, now, "created")], []), id, "0", 1);
     }
     private sealed class Store(params JobCandidate[] jobs) : IProcessingStore
     {
@@ -30,7 +30,9 @@ public sealed class ConcurrencyTests
         public TaskCompletionSource? Initialization;
         public bool Residual;
         public JobReference[] References = [];
-        public int Checks, Scans, Reads, Losers;
+        public Func<DateTimeOffset, long, Task<IReadOnlyList<ScheduledCandidate>>>? SelectScheduled;
+        public Func<ScheduledCandidate, DateTimeOffset, Task<PromotionResult>>? Promote;
+        public int Checks, Scans, Reads, Losers, Selections, Promotions;
         public int Pending { get { lock (gate) return ready.Count; } }
         public async Task<bool> HasProcessingAsync()
         {
@@ -43,6 +45,16 @@ public sealed class ConcurrencyTests
             Interlocked.Increment(ref Scans);
             await Task.CompletedTask;
             foreach (var reference in References) yield return reference;
+        }
+        public Task<IReadOnlyList<ScheduledCandidate>> ReadScheduledAsync(DateTimeOffset now, long offset)
+        {
+            Interlocked.Increment(ref Selections);
+            return SelectScheduled?.Invoke(now, offset) ?? Task.FromResult<IReadOnlyList<ScheduledCandidate>>([]);
+        }
+        public Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now)
+        {
+            Interlocked.Increment(ref Promotions);
+            return Promote!(candidate, now);
         }
         public Task<JobCandidate?> PeekAsync()
         {
