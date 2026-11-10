@@ -2,7 +2,7 @@
 
 ## Entrega e evidências
 
-A biblioteca disponibiliza `RedisJobClient.EnqueueAsync` e `RedisJobManager.GetAsync`, sem HTTP ou execução de handlers. Os contratos da spec estão representados nos testes permanentes abaixo. A E1 permanece em andamento, com demonstração HTTP na E1.3.
+A biblioteca disponibiliza `RedisJobClient.EnqueueAsync` e `RedisJobManager.GetAsync`, sem execução de handlers. Os contratos do armazenamento estão representados nos testes permanentes abaixo. A E1 está concluída, com demonstração HTTP e evidências complementares em [validação da E1](validacao-e1.md).
 
 | Garantia | Evidência executável |
 | --- | --- |
@@ -43,10 +43,10 @@ Ambiente de validação: SDK 10.0.114, Redis 8.2.10 em instância dedicada na po
 - A leitura por nova conexão demonstra independência de memória local, sem provar recuperação após queda do processo ou reinício do Redis. Persistência com encerramento abrupto pertence à E6.
 - A criação reconhece repetição equivalente no armazenamento, mas não há loop próprio de retry/reconciliação de rede. Confirmações ambíguas e falhas no meio das operações pertencem à E7.
 - Os históricos de execução dos testes são semeados; workers, promoção de agendamentos, retry, deleção, reenfileiramento e recuperação ainda dependem das etapas responsáveis.
-- Endpoints e integração dos serviços na demo pertencem à E1.3; `DATA_DIR`, à E6.
+- `DATA_DIR` e a demonstração de reinício pertencem à E6. A integração HTTP está documentada na validação da E1.
 
 ## Informações do estudo
 
-O escopo desta sessão é a solicitação “implemente a task E1.2”, baseada nos refinamentos de criação e consulta. O trabalho usa Codex, terminal Bash, .NET SDK, xUnit, StackExchange.Redis, scripts Lua e Redis real. Não houve delegação a outros agentes. A identificação exata do modelo, tokens, custo e tempo humano não foram medidos nesta execução.
+O escopo deste artefato é a criação e consulta no Redis, correspondente à solicitação “implemente a task E1.2”. O trabalho usa Codex, terminal Bash, .NET SDK, xUnit, StackExchange.Redis, scripts Lua e Redis real. Não houve delegação a outros agentes. A identificação exata do modelo, tokens, custo e tempo humano não foram medidos nesta execução.
 
 Os artefatos duráveis são o código da biblioteca, os projetos de teste, este documento, a arquitetura, o README e o plano macro. As decisões implementadas estão na seção 5.4 da arquitetura: composição por construtor, conexão mantida pelo chamador, datas exatas separadas dos scores, identidade imutável de criação e scripts embutidos. As verificações preservam a classificação das exceções já produzidas pela preparação, incluindo `JsonException` de serialização estrutural e exceções inesperadas de validadores. A exportação da conversa integral e a consolidação dos dados humanos do estudo permanecem pendências da E8; a sessão de execução no Codex é a fonte da conversa.

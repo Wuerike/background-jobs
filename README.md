@@ -4,11 +4,12 @@ Biblioteca em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 
 - `BackgroundJobs.slnx`: solução com biblioteca, demo, testes unitários e de integração.
 - `src/BackgroundJobs`: registro tipado, validação, criação persistente e consulta de detalhe no Redis.
-- `src/BackgroundJobs.Demo`: aplicação ASP.NET Core que cadastra o contrato `log-message` e seu validador.
+- `src/BackgroundJobs.Demo`: aplicação ASP.NET Core que cadastra `log-message` e expõe criação e consulta por HTTP.
 - `tests/BackgroundJobs.UnitTests`: registro, preparação, modelos e orquestração, sem Redis.
 - `tests/BackgroundJobs.IntegrationTests`: criação atômica, consulta consistente, índices e concorrência com Redis real.
+- `tests/BackgroundJobs.HttpTests`: contratos HTTP, validação de entrada e integração com Redis real.
 
-A E1.2 disponibiliza `RedisJobClient` e `RedisJobManager` para criar e consultar jobs pela biblioteca. Endpoints pertencem à E1.3. Execução, promoção de agendamentos, retry e demais operações permanecem planejados; os pedidos criados ficam pendentes no armazenamento.
+A E1 disponibiliza `RedisJobClient` e `RedisJobManager` para criar e consultar jobs pela biblioteca, além de `POST /demo/jobs` e `GET /api/jobs/{id}` na demo. Execução, promoção de agendamentos, retry e demais operações permanecem planejados; os pedidos criados ficam pendentes no armazenamento.
 
 ## Registro de contratos
 
@@ -76,7 +77,7 @@ docker compose exec redis redis-cli ping
 
 O segundo comando deve retornar `PONG`. O serviço fica disponível apenas em
 `127.0.0.1:6379`, sem senha, para desenvolvimento local. A aplicação .NET executada
-no host deverá usar a connection string `127.0.0.1:6379`. A demo ainda não compõe os serviços Redis nem expõe endpoints; o uso direto da biblioteca está disponível.
+no host deverá usar a connection string `127.0.0.1:6379`. A demo usa `REDIS_CONNECTION` para acessar esse armazenamento; o padrão é `127.0.0.1:6379`.
 
 Se a porta já estiver ocupada, escolha outra ao iniciar:
 
@@ -123,7 +124,13 @@ dotnet build BackgroundJobs.slnx
 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
 ```
 
-A aplicação inicia o servidor HTTP, ainda sem rotas. Requisições retornam `404`.
+A demo escuta na porta definida por `PORT` (padrão `8080`) e usa `REDIS_CONNECTION` (padrão `127.0.0.1:6379`). Para uma porta alternativa do Redis e da demo:
+
+```bash
+PORT=8081 REDIS_CONNECTION=127.0.0.1:6380 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
+```
+
+`WORKER_COUNT` e `DATA_DIR` pertencem às etapas do motor e de persistência/reinício; ainda não são consumidos. O Compose mantém os dados no volume `redis-data`.
 
 Os diretórios de saída são centralizados na pasta `build/` da raiz por `Directory.Build.props`, usando o [layout de artefatos do SDK](https://learn.microsoft.com/pt-br/dotnet/core/sdk/artifacts-output):
 
@@ -131,6 +138,44 @@ Os diretórios de saída são centralizados na pasta `build/` da raiz por `Direc
 - `build/obj/<projeto>/<configuração>/`: arquivos intermediários; os arquivos de restore ficam em `build/obj/<projeto>/`.
 
 A pasta `build/` é ignorada pelo Git.
+
+
+## Demonstrar criação e consulta HTTP
+
+Com Redis e a demo em execução, execute em outro terminal Bash (os comandos usam `curl`, `python3` e GNU `date`, disponíveis no ambiente WSL documentado):
+
+```bash
+base=http://localhost:8080
+immediate=$(curl --fail-with-body -sS "$base/demo/jobs" \
+  -H 'Content-Type: application/json' \
+  -d '{"job":"log-message","params":{"message":"Olá imediato"}}')
+printf '%s\n' "$immediate"
+immediate_id=$(printf '%s' "$immediate" | python3 -c 'import json,sys; print(json.load(sys.stdin)["jobId"])')
+curl --fail-with-body -sS "$base/api/jobs/$immediate_id" | python3 -m json.tool
+
+run_at=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')
+future=$(curl --fail-with-body -sS "$base/demo/jobs" \
+  -H 'Content-Type: application/json' \
+  -d "{\"job\":\"log-message\",\"params\":{\"message\":\"Olá futuro\"},\"options\":{\"runAt\":\"$run_at\",\"maxAttempts\":2,\"retryDelayMs\":500}}")
+printf '%s\n' "$future"
+future_id=$(printf '%s' "$future" | python3 -c 'import json,sys; print(json.load(sys.stdin)["jobId"])')
+curl --fail-with-body -sS "$base/api/jobs/$future_id" | python3 -m json.tool
+```
+
+Cada criação retorna `202 { "jobId": "..." }`; cada consulta retorna `200` com `args` estruturado, opções efetivas, datas UTC e histórico inicial. O primeiro pedido fica `enqueued`; o segundo, `scheduled`, com `scheduledAt` igual ao instante informado. Ambos têm zero tentativas e permanecem pendentes, pois execução e promoção de agendamentos pertencem às próximas etapas.
+
+A entrada aceita somente `job`, `params` e `options`, com nomes sensíveis a maiúsculas, sem campos desconhecidos ou duplicados. Apenas `log-message` está disponível: `params.message` é obrigatório e textual. `options` ausente ou `{}` usa os padrões; `options: null` e campos de opção nulos são inválidos. Inteiros não aceitam strings, frações ou notação exponencial; `runAt` exige ISO-8601 com `Z` ou offset explícito.
+
+Para observar os erros:
+
+```bash
+curl -i -sS "$base/demo/jobs" -H 'Content-Type: application/json' \
+  -d '{"job":"log-message","params":{"message":null}}'
+curl -i -sS "$base/api/jobs/id-inexistente"
+```
+
+Entrada inválida retorna `400` e ID inexistente retorna `404`, sempre com `{ "error": "mensagem legível" }`. Falhas inesperadas retornam `500` com mensagem genérica; detalhes ficam nos logs do servidor. Listagem, deleção, reenfileiramento, eventos, outros jobs da demo e `/health` permanecem planejados.
+
 
 ## Validar
 
@@ -140,16 +185,17 @@ dotnet build BackgroundJobs.slnx
 dotnet test BackgroundJobs.slnx --no-build
 ```
 
-A suíte completa exige Redis real disponível; inicie-o com `docker compose up -d --wait redis`. A integração falha explicitamente se não conseguir conectar, sem ignorar testes.
+As suítes de integração e HTTP exigem Redis real disponível; inicie-o com `docker compose up -d --wait redis`. A integração falha explicitamente se não conseguir conectar, sem ignorar testes.
 
 ```bash
 # Somente unitários, sem Redis
 dotnet test tests/BackgroundJobs.UnitTests --no-build
 
-# Integração com porta alternativa
+# Integração e HTTP com porta alternativa
 REDIS_CONNECTION=127.0.0.1:6380 dotnet test tests/BackgroundJobs.IntegrationTests --no-build
+REDIS_CONNECTION=127.0.0.1:6380 dotnet test tests/BackgroundJobs.HttpTests --no-build
 ```
 
 `REDIS_CONNECTION` usa `127.0.0.1:6379` por padrão e deve corresponder à porta escolhida em `REDIS_PORT` no Compose. Cada teste usa prefixo exclusivo e limpa somente suas chaves, sem `FLUSHDB` ou mudanças na configuração do servidor. Um Redis externo equivalente também pode ser usado.
 
-A cobertura e os limites da entrega estão em [docs/validacao-e1.2.md](docs/validacao-e1.2.md).
+A cobertura e os limites da entrega estão em [validação da E1](docs/validacao-e1.md) e [validação do armazenamento](docs/validacao-e1.2.md).

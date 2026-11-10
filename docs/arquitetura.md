@@ -4,7 +4,7 @@
 
 Este documento registra a arquitetura baseada na [especificação funcional](spec-base.md), distinguindo o código disponível dos componentes planejados.
 
-A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados o registro de contratos e handlers, os modelos públicos e a preparação interna com serialização, validação e relógio injetável. A demo cadastra o contrato `log-message`. A criação e a consulta de detalhe integradas ao Redis estão disponíveis. HTTP e motor permanecem planejados.
+A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados o registro de contratos e handlers, os modelos públicos e a preparação interna com serialização, validação e relógio injetável. A demo cadastra o contrato `log-message`. A criação e a consulta de detalhe integradas ao Redis estão disponíveis. A demo expõe criação e detalhe por HTTP. O motor permanece planejado.
 
 A entrega prevista é uma biblioteca com motor próprio de processamento e uma aplicação demonstrativa. A biblioteca executa as funções dentro do processo da aplicação consumidora; Redis é o serviço externo de armazenamento.
 
@@ -506,6 +506,10 @@ Esse ajuste ainda precisa ser implementado. Dados existentes no volume nomeado p
 
 ## 13. API HTTP
 
+A demo disponibiliza `POST /demo/jobs` para `log-message` e `GET /api/jobs/{id}` para qualquer contrato persistido. Os demais endpoints da tabela permanecem planejados.
+
+A composição no `Program` registra catálogo, `IJobClient`, `IJobManager` e uma conexão Redis compartilhada como singletons. O contêiner de serviços possui e descarta a conexão; não há conexão por pedido. `PORT` configura a escuta HTTP e `REDIS_CONNECTION` configura o armazenamento. Não há worker ou handler em execução nesta etapa.
+
 A demo adapta os contratos da biblioteca aos endpoints obrigatórios:
 
 | Endpoint | Comportamento |
@@ -524,13 +528,20 @@ A criação aceita `job`, `params` e `options`, conforme a spec. `options` é op
 - `maxAttempts`: inteiro de 1 a 10, padrão 3.
 - `retryDelayMs`: inteiro de 0 a 60.000, padrão 1000.
 
-Centralizar a tradução de erros para `{ "error": "mensagem legível" }`, evitando respostas padrão do framework incompatíveis com o contrato:
+O parser HTTP inspeciona o documento JSON original antes de construir `LogMessageArgs` e `JobOptions`, preservando a informação de duplicidades e de ausência versus `null`. Os nomes são sensíveis a maiúsculas e não são normalizados. Campos desconhecidos e duplicados são rejeitados em cada objeto, incluindo nomes equivalentes após decodificar escapes. Objetos aninhados não fazem parte do contrato atual de argumentos.
+
+`job` e `params` são obrigatórios. `params.message` é obrigatório e textual, com regras de comprimento aplicadas pelo validador da biblioteca. `options` ausente ou `{}` usa os padrões; `options: null` e campos de opção nulos são inválidos. Inteiros exigem representação inteira de 32 bits, sem strings, frações ou expoentes; faixas são validadas pela biblioteca. `runAt` exige data ISO-8601 com `Z` ou offset explícito e é normalizado para UTC.
+
+O endpoint chama a criação tipada da biblioteca e traduz `JobValidationException` para `400`, preservando sua mensagem. Capturas de erros de JSON ficam restritas ao parser; `ArgumentException`, `JsonException` e outras falhas inesperadas de validadores produzem `500`, com mensagem genérica e detalhes apenas nos logs. O middleware aplica o mesmo corpo genérico às falhas de armazenamento na criação e consulta. O detalhe chama diretamente `GetAsync(id)`, sem resolver contratos ou reconstruir DTOs; serializa propriedades e enums em `camelCase`, datas UTC e argumentos como JSON estruturado.
+
+Os erros HTTP usam `{ "error": "mensagem legível" }`:
 
 | Código | Situação |
 | --- | --- |
 | `400` | Entrada inválida. |
 | `404` | ID inexistente. |
-| `409` | Operação incompatível com o estado atual. |
+| `409` | Operação incompatível com o estado atual (operações planejadas). |
+| `500` | Falha inesperada, com mensagem genérica. |
 
 Não são necessários filtros ou paginação.
 
