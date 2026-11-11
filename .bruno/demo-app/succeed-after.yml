@@ -1,0 +1,45 @@
+info:
+  name: succeed-after
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{baseUrl}}/demo/jobs"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "job": "succeed-after",
+        "params": { "delayMs": 5000 },
+        "options": {
+          "runAt": "{{runAt}}",
+          "maxAttempts": 3,
+          "retryDelayMs": 1000
+        }
+      }
+
+runtime:
+  variables:
+    - name: scheduleDelaySeconds
+      value: "1"
+  scripts:
+    - type: before-request
+      code: |-
+        const seconds = Number(bru.getRequestVar("scheduleDelaySeconds"));
+        bru.setVar("runAt", new Date(Date.now() + seconds * 1000).toISOString());
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: |-
+  Espera delayMs (0 a 60000) durante a execução e termina com sucesso.
+  Na aba Vars, scheduleDelaySeconds = 0 enfileira imediatamente; 30 agenda
+  para daqui a 30 segundos. runAt é recalculado em UTC a cada envio.
+  Copie o jobId da resposta 202 para o ambiente Local da coleção backgound-jobs-lib.

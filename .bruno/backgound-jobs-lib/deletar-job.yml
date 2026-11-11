@@ -1,0 +1,11 @@
+info:
+  name: Deletar job pendente
+  type: http
+  seq: 4
+http:
+  method: DELETE
+  url: "{{baseUrl}}/api/jobs/{{jobId}}"
+docs: |-
+  Deleta logicamente apenas jobs scheduled ou enqueued; retorna 200 com state deleted.
+  Para experimentar, crie um job com scheduleDelaySeconds = 60 e use seu jobId antes do horário.
+  Outros estados retornam 409; ID inexistente retorna 404. Históricos são preservados.

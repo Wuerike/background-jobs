@@ -1,0 +1,10 @@
+info:
+  name: Verificar disponibilidade
+  type: http
+  seq: 1
+http:
+  method: GET
+  url: "{{baseUrl}}/health"
+docs: |-
+  Retorna 200 com status ok quando o executor está pronto para processar.
+  Retorna 503 com status unavailable enquanto estiver indisponível.

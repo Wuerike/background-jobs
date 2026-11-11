@@ -1,0 +1,10 @@
+info:
+  name: Listar jobs
+  type: http
+  seq: 2
+http:
+  method: GET
+  url: "{{baseUrl}}/api/jobs"
+docs: |-
+  Retorna items com id, name, state e attempts de todos os jobs persistidos.
+  Use um id da lista como jobId no ambiente Local para consultar ou gerenciar o job.

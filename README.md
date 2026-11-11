@@ -370,6 +370,18 @@ Para observar recuperação após queda, substitua a parada por `kill -KILL "$de
 
 ## Demonstrar execução HTTP
 
+### Requests no Bruno
+
+Abra as coleções [.bruno/demo-app](.bruno/demo-app/opencollection.yml) e [.bruno/backgound-jobs-lib](.bruno/backgound-jobs-lib/opencollection.yml) no Bruno e selecione o ambiente `Local` em cada uma. Ambas usam `baseUrl = http://localhost:8080`; ajuste essa variável se alterar a porta da demo.
+
+A coleção `demo-app` contém um request para cada tipo de job (`succeed-after`, `fail-n-times` e `log-message`) e a consulta de eventos. Edite os parâmetros e as opções no corpo JSON. Na aba Vars de cada request de criação, `scheduleDelaySeconds` controla quando executar: `0` enfileira imediatamente, `30` agenda para daqui a 30 segundos e um valor negativo demonstra horário passado. O script calcula `runAt` em UTC a cada envio. `delayMs` representa a duração da função `succeed-after`, independentemente do agendamento.
+
+A coleção `backgound-jobs-lib` contém health, listagem, detalhe, deleção e reenfileiramento. A biblioteca é consumida em processo; esses requests usam os endpoints de gerenciamento expostos pela demo. Copie o `jobId` retornado pela criação para a variável `jobId` do ambiente `Local` dessa coleção; também é possível usar um `id` da listagem. As variáveis das duas coleções têm escopos separados.
+
+Para experimentar a deleção, crie um job com `scheduleDelaySeconds = 60` e delete-o antes do horário. Para reenfileirar, use um job em `succeeded`, `failed` ou `deleted`. As regras de estado e as respostas esperadas estão na aba Docs de cada request.
+
+### Requests com curl
+
 Com Redis e a demo em execução, use outro terminal:
 
 ```bash

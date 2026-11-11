@@ -1,0 +1,38 @@
+info:
+  name: fail-n-times
+  type: http
+  seq: 2
+http:
+  method: POST
+  url: "{{baseUrl}}/demo/jobs"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "job": "fail-n-times",
+        "params": { "failTimes": 2 },
+        "options": {
+          "runAt": "{{runAt}}",
+          "maxAttempts": 3,
+          "retryDelayMs": 500
+        }
+      }
+runtime:
+  variables:
+    - name: scheduleDelaySeconds
+      value: "0"
+  scripts:
+    - type: before-request
+      code: |-
+        const seconds = Number(bru.getRequestVar("scheduleDelaySeconds"));
+        bru.setVar("runAt", new Date(Date.now() + seconds * 1000).toISOString());
+docs: |-
+  Falha com demo failure nas primeiras failTimes tentativas (0 a 10).
+  Com failTimes = 2 e maxAttempts = 3, tem sucesso na terceira tentativa.
+  Use failTimes = 10 para observar o esgotamento das três tentativas.
+  Na aba Vars, scheduleDelaySeconds = 0 enfileira imediatamente; 30 agenda
+  para daqui a 30 segundos. runAt é recalculado em UTC a cada envio.
+  Copie o jobId da resposta 202 para o ambiente Local da coleção backgound-jobs-lib.

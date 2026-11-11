@@ -1,0 +1,11 @@
+info:
+  name: Reenfileirar job finalizado
+  type: http
+  seq: 5
+http:
+  method: POST
+  url: "{{baseUrl}}/api/jobs/{{jobId}}/requeue"
+docs: |-
+  Aceita succeeded, failed ou deleted; retorna 202 com o mesmo jobId.
+  Reinicia o contador de tentativas, preserva os históricos e enfileira imediatamente.
+  Outros estados retornam 409; ID inexistente retorna 404.

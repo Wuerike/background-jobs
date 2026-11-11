@@ -1,0 +1,36 @@
+info:
+  name: log-message
+  type: http
+  seq: 3
+http:
+  method: POST
+  url: "{{baseUrl}}/demo/jobs"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "job": "log-message",
+        "params": { "message": "Olá do Bruno!" },
+        "options": {
+          "runAt": "{{runAt}}",
+          "maxAttempts": 3,
+          "retryDelayMs": 1000
+        }
+      }
+runtime:
+  variables:
+    - name: scheduleDelaySeconds
+      value: "0"
+  scripts:
+    - type: before-request
+      code: |-
+        const seconds = Number(bru.getRequestVar("scheduleDelaySeconds"));
+        bru.setVar("runAt", new Date(Date.now() + seconds * 1000).toISOString());
+docs: |-
+  Registra message (obrigatória, até 200 unidades UTF-16) nos eventos da demo.
+  Na aba Vars, scheduleDelaySeconds = 0 enfileira imediatamente; 30 agenda
+  para daqui a 30 segundos. runAt é recalculado em UTC a cada envio.
+  Copie o jobId da resposta 202 para o ambiente Local da coleção backgound-jobs-lib.

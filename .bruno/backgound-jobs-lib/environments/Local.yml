@@ -1,0 +1,6 @@
+name: Local
+variables:
+  - name: baseUrl
+    value: http://localhost:8080
+  - name: jobId
+    value: COLE_O_JOB_ID_AQUI
