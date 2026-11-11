@@ -2,7 +2,7 @@
 
 Biblioteca em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 
-- `BackgroundJobs.slnx`: solução com biblioteca, demo, testes unitários e de integração.
+- `BackgroundJobs.slnx`: solução com biblioteca, demo e três suítes de testes.
 - `src/BackgroundJobs`: registro tipado, criação, consulta e gerenciamento, agendamento, retries e execução com workers configuráveis, persistência de tentativas e ciclo do servidor.
 - `src/BackgroundJobs.Demo`: aplicação ASP.NET Core com os três jobs da spec, criação, listagem, detalhe, deleção, reenfileiramento, eventos e health.
 - `tests/BackgroundJobs.UnitTests`: registro, preparação, modelos e orquestração, sem Redis.
@@ -11,19 +11,26 @@ Biblioteca em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 
 A biblioteca cria, consulta, agenda e executa jobs com quantidade configurável de workers, padrão 4. Falhas com orçamento restante voltam à fila após o atraso fixo contado do fim da tentativa; sucesso ou esgotamento encerram o job. Estados, histórico e tentativas são persistentes. Listagem, deleção lógica de pendentes e reenfileiramento manual de finalizados estão disponíveis pela biblioteca e HTTP. Antes da prontidão, a recuperação fecha tentativas abertas como `interrupted`: reenfileira imediatamente quando resta orçamento ou finaliza em `failed` quando o limite foi atingido. A tentativa interrompida conta no limite; funções podem repetir efeitos externos após uma queda (at-least-once sujeito ao orçamento).
 
+Para reproduzir em Bash/Linux/WSL: [prepare o SDK](#sdk-no-wsl), [inicie o Redis](#redis-local), [compile e inicie a demo](#compilar-e-executar), [exercite o HTTP](#demonstrar-execução-http), [execute os testes](#validar) e [reinicie com os mesmos dados](#parar-e-reiniciar-com-os-mesmos-dados).
+
 ## Registro de contratos
 
 O registro é configurado antes de usar a biblioteca e permanece estável durante o processamento. Um produtor precisa somente do contrato e de sua validação:
 
 ```csharp
 using BackgroundJobs;
-using BackgroundJobs.Demo.Jobs;
 
+var logMessage = new JobDefinition<MessageArgs>("message.v1");
 var registry = new JobRegistry();
-registry.Contracts.Add(DemoJobs.LogMessage, DemoJobValidation.ValidateLogMessage);
+registry.Contracts.Add(logMessage, args =>
+{
+    if (args.Message is null) throw new JobValidationException("Mensagem obrigatória.");
+});
+
+public sealed record MessageArgs(string Message);
 ```
 
-A demo fornece `LogMessageArgs(string Message)`. A mensagem é obrigatória e aceita até 200 unidades UTF-16 (`string.Length`), incluindo string vazia; espaços e conteúdo Unicode bem formado são preservados. A biblioteca rejeita strings com surrogates sem par usando `JobValidationException`, inclusive em valores aninhados, chaves de dicionários e nomes e valores textuais de `JsonNode` (`JsonObject`, `JsonArray` e `JsonValue`), também nos dicionários de dados de extensão com `[JsonExtensionData]`, antes de escrever o texto no JSON. Os argumentos e validadores de outros jobs pertencem à aplicação consumidora.
+Na demo, o contrato `log-message` usa `LogMessageArgs(string Message)`. A mensagem é obrigatória e aceita até 200 unidades UTF-16 (`string.Length`), incluindo string vazia; espaços e conteúdo Unicode bem formado são preservados. A biblioteca rejeita strings com surrogates sem par usando `JobValidationException`, inclusive em valores aninhados, chaves de dicionários e nomes e valores textuais de `JsonNode` (`JsonObject`, `JsonArray` e `JsonValue`), também nos dicionários de dados de extensão com `[JsonExtensionData]`, antes de escrever o texto no JSON. Os argumentos e validadores de outros jobs pertencem à aplicação consumidora.
 
 Para associar uma implementação a um contrato conhecido, use `registry.Handlers.Register(job, handler)`. Para adicionar contrato novo e handler juntos, use `registry.Register(job, handler, validate)`. O handler tem assinatura `Func<TArgs, JobContext, Task>`; cadastro e preparação não o executam. Nomes são sensíveis a maiúsculas e cadastros duplicados são rejeitados.
 
@@ -31,42 +38,69 @@ O validador opcional é um `Action<TArgs>`: retorno normal aceita os argumentos;
 
 ## Criar, executar e consultar sem HTTP
 
-Com Redis iniciado, uma aplicação consumidora pode usar as interfaces públicas:
+Com Redis iniciado, crie uma aplicação console fora do repositório. Na raiz deste checkout, os comandos abaixo geram um consumidor com referência somente à biblioteca; não é necessário publicar um pacote NuGet:
+
+```bash
+repo="$PWD"
+consumer_dir="$(mktemp -d /tmp/background-jobs-consumer.XXXXXX)"
+dotnet new console --framework net10.0 --output "$consumer_dir"
+dotnet add "$consumer_dir" reference "$repo/src/BackgroundJobs/BackgroundJobs.csproj"
+```
+
+Substitua o `Program.cs` gerado pelo conteúdo completo abaixo. O registro e `EnqueueAsync` são suficientes para produzir o pedido; o restante demonstra execução e consulta pública sem abrir HTTP:
 
 ```csharp
 using BackgroundJobs;
-using BackgroundJobs.Demo.Jobs;
 using StackExchange.Redis;
 
+var message = new JobDefinition<MessageArgs>("message.v1");
 var registry = new JobRegistry();
-registry.Contracts.Add(DemoJobs.LogMessage, DemoJobValidation.ValidateLogMessage);
-registry.Handlers.Register(DemoJobs.LogMessage, (args, context) =>
+registry.Register(message, (args, context) =>
 {
-    Console.WriteLine(args.Message);
+    Console.WriteLine($"{context.JobId}, tentativa {context.Attempt}: {args.Message}");
     return Task.CompletedTask;
 });
 
-using var connection = await ConnectionMultiplexer.ConnectAsync("127.0.0.1:6379");
-const string prefix = "library-example";
+using var connection = await ConnectionMultiplexer.ConnectAsync(
+    Environment.GetEnvironmentVariable("REDIS_CONNECTION") ?? "127.0.0.1:6379");
+var prefix = "library-example-" + Guid.NewGuid().ToString("N");
 IJobClient client = new RedisJobClient(registry.Contracts, connection, prefix);
 IJobManager manager = new RedisJobManager(connection, prefix);
-var id = await client.EnqueueAsync(DemoJobs.LogMessage, new LogMessageArgs("Olá"),
-    new JobOptions { RunAt = DateTimeOffset.UtcNow.AddSeconds(1), MaxAttempts = 3, RetryDelayMs = 500 });
+var id = await client.EnqueueAsync(message, new MessageArgs("Olá"));
+var persisted = await manager.GetAsync(id)
+    ?? throw new InvalidOperationException("Pedido não encontrado após confirmação.");
+Console.WriteLine($"Persistido: {persisted.Id}, argumentos {persisted.Args}");
+
 await using var server = new JobServer(registry, connection, prefix, workerCount: 1);
 await server.StartAsync();
-using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-JobDetails? detail;
-do
+using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+JobDetails detail;
+while (true)
 {
-    detail = await manager.GetAsync(id);
-    if (detail!.State == JobState.Succeeded) break;
+    detail = await manager.GetAsync(id)
+        ?? throw new InvalidOperationException("Pedido não encontrado.");
+    if (detail.State is JobState.Succeeded or JobState.Failed) break;
     await Task.Delay(20, timeout.Token);
-} while (true);
+}
+if (detail.State != JobState.Succeeded)
+    throw new InvalidOperationException($"Job falhou: {detail.AttemptHistory.Last().Error}");
 Console.WriteLine($"{detail.Id}: {detail.State}, tentativa {detail.Attempts}");
+Console.WriteLine(string.Join(" → ", detail.History.Select(change => change.State)));
+Console.WriteLine($"Resultado: {detail.AttemptHistory.Last().Outcome}");
 await server.StopAsync();
+
+public sealed record MessageArgs(string Message);
 ```
 
-O exemplo usa o contrato da demo, mas o consumidor pode definir seus próprios tipos e validadores. Um produtor que apenas cadastra `Contracts.Add` pode criar e consultar sem handler; ele não deve iniciar um executor com referências sem implementação. `GetAsync` não recebe registro e devolve `null` exclusivamente para ID inexistente; erros Redis e dados inválidos propagam como falhas.
+Execute com a conexão do Redis preparado:
+
+```bash
+REDIS_CONNECTION=127.0.0.1:6379 dotnet run --project "$consumer_dir"
+```
+
+A saída identifica o pedido persistido, argumentos, ID e tentativa recebidos pelo handler, estado `Succeeded`, histórico `Enqueued → Processing → Succeeded` e resultado da tentativa. O prefixo exclusivo é compartilhado pelos três componentes; guarde-o se quiser consultar os dados em outra execução. A conexão pertence ao consumidor e é descartada depois do servidor. Existe um executor por armazenamento; para outro ciclo de execução, crie uma nova instância de `JobServer`.
+
+Um produtor que apenas cadastra `Contracts.Add` pode criar e consultar sem handler; ele não deve iniciar um executor com referências sem implementação. `GetAsync` não recebe registro e devolve `null` exclusivamente para ID inexistente; erros Redis e dados inválidos propagam como falhas.
 
 `IJobManager` também funciona sem catálogo, handlers ou motor iniciado:
 
@@ -80,7 +114,7 @@ JobOperationResult requeue = await manager.RequeueAsync(id);
 
 As mutações retornam `Applied`, `NotFound` ou `Conflict` somente após a decisão persistente. Deletar aceita `Scheduled`/`Enqueued`, mantém o detalhe consultável e impede execução até um reenfileiramento posterior. Reenfileirar aceita `Succeeded`/`Failed`/`Deleted`, mantém ID, contrato, JSON, opções e criação, zera o contador e coloca o job no fim da fila, sem reaplicar o agendamento original. A primeira tentativa de cada ciclo é 1; todos os históricos anteriores permanecem. IDs são opacos, sem normalização; nulo é erro de argumento. Falhas de infraestrutura são exceções, inclusive quando uma confirmação não chega: não se deve interpretar o erro como prova de ausência de efeito. A biblioteca reconcilia internamente a mesma chamada usando recibos persistidos; outra chamada manual é uma nova operação legítima.
 
-A conexão é criada, compartilhada e descartada pelo chamador; os serviços não a descartam nem abrem uma conexão por pedido. Cliente, gerente e servidor aceitam `prefix`, com padrão `background-jobs`; use o mesmo em todos os componentes. Prefixos diferentes isolam armazenamentos lógicos; o exemplo usa `library-example` para isolar os dados da demo. São aceitas apenas letras ASCII, dígitos, ponto, hífen e sublinhado, sem valor vazio. Cliente, gerente e servidor também aceitam `timeProvider`, com padrão `TimeProvider.System`. O servidor aceita `workerCount` como último argumento, com padrão 4 e mínimo 1; a quantidade fica fixa durante a vida da instância. Use `workerCount: 1` para FIFO pela sequência persistida de entrada na fila. Com vários workers, não há garantia da ordem exata de início ou término. A reserva Lua garante exclusividade por job; a quantidade de loops limita as funções simultâneas. Handlers e validadores podem executar simultaneamente e devem sincronizar seu estado compartilhado.
+A conexão é criada, compartilhada e descartada pelo chamador; os serviços não a descartam nem abrem uma conexão por pedido. Cliente, gerente e servidor aceitam `prefix`, com padrão `background-jobs`; use o mesmo em todos os componentes. Prefixos diferentes isolam armazenamentos lógicos; o exemplo gera um prefixo exclusivo para isolar seus dados. São aceitas apenas letras ASCII, dígitos, ponto, hífen e sublinhado, sem valor vazio. Cliente, gerente e servidor também aceitam `timeProvider`, com padrão `TimeProvider.System`. O servidor aceita `workerCount` como último argumento, com padrão 4 e mínimo 1; a quantidade fica fixa durante a vida da instância. Use `workerCount: 1` para FIFO pela sequência persistida de entrada na fila. Com vários workers, não há garantia da ordem exata de início ou término. A reserva Lua garante exclusividade por job; a quantidade de loops limita as funções simultâneas. Handlers e validadores podem executar simultaneamente e devem sincronizar seu estado compartilhado.
 
 O ID retorna somente após confirmação da criação. A escrita inclui dados, histórico e índices na mesma operação. Jobs futuros ficam `Scheduled`, com data exata preservada, e o scheduler da biblioteca os promove à fila quando elegíveis, sem antecipar a data. A mesma promoção atende retries, atribuindo nova posição FIFO e preservando tentativas. O scheduler usa páginas de até 128 candidatos e polling ocioso de 100 ms, independente dos workers. Falhas transitórias usam reconciliação limitada: consulta de confirmação e, quando necessária, uma retransmissão do mesmo pedido. Uma falha persistente não prova ausência de efeito. Chamadas públicas independentes geram IDs distintos.
 
@@ -104,7 +138,7 @@ docker compose up -d --wait redis
 docker compose exec redis redis-cli ping
 ```
 
-O segundo comando deve retornar `PONG`. O serviço fica disponível apenas em
+O comando de ping deve retornar `PONG`. O serviço fica disponível apenas em
 `127.0.0.1:6379`, sem senha, para desenvolvimento local. A aplicação .NET executada
 no host deverá usar a connection string `127.0.0.1:6379`. A demo usa `REDIS_CONNECTION` para acessar esse armazenamento; o padrão é `127.0.0.1:6379`.
 
@@ -126,9 +160,9 @@ docker compose down
 `DATA_DIR` configura uma montagem bind para `/data`; ausente ou vazia usa `./data`, relativo ao diretório do arquivo Compose. O diretório deve existir e permitir escrita pelo usuário Redis do container; não aplique permissões amplas. O entrypoint da imagem oficial ajusta o proprietário quando iniciado como root; em ambientes que impedem esse ajuste, prepare o proprietário antes de iniciar. `/data/` na raiz do repositório é ignorado pelo Git. Para outro caminho, inclusive com espaços:
 
 ```bash
-mkdir -p "$PWD/dados locais"
-DATA_DIR="$PWD/dados locais" REDIS_PORT=6380 docker compose up -d --wait redis
-DATA_DIR="$PWD/dados locais" REDIS_PORT=6380 docker compose config
+mkdir -p "$PWD/data/dados locais"
+DATA_DIR="$PWD/data/dados locais" REDIS_PORT=6380 docker compose up -d --wait redis
+DATA_DIR="$PWD/data/dados locais" REDIS_PORT=6380 docker compose config
 ```
 
 Use os mesmos valores de diretório e porta em cada comando Compose. `docker compose down` e a recriação do container preservam os arquivos no host. Um diretório vazio diferente representa outro armazenamento; não execute dois Redis no mesmo diretório. Exportar `DATA_DIR` somente para o processo .NET não move os dados de um Redis externo. Nesse caso, configure o diretório e AOF no próprio servidor e mantenha a mesma `REDIS_CONNECTION` no reinício.
@@ -210,7 +244,8 @@ instalados, use `dotnet --list-sdks`.
 ## Compilar e executar
 
 ```bash
-dotnet build BackgroundJobs.slnx
+dotnet restore BackgroundJobs.slnx
+dotnet build BackgroundJobs.slnx --no-restore
 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
 ```
 
@@ -237,6 +272,31 @@ Os diretórios de saída são centralizados na pasta `build/` da raiz por `Direc
 
 A pasta `build/` é ignorada pelo Git.
 
+
+## Parar e reiniciar com os mesmos dados
+
+Para uso interativo com `dotnet run`, pressione Ctrl+C e aguarde o término das funções. Para enviar sinais ao processo executor diretamente em Linux/WSL, use a DLL compilada. Na raiz do repositório, execute no mesmo terminal:
+
+```bash
+export PORT=8080 WORKER_COUNT=4 REDIS_CONNECTION=127.0.0.1:6379
+dotnet build BackgroundJobs.slnx --no-restore
+dotnet build/bin/BackgroundJobs.Demo/debug/BackgroundJobs.Demo.dll > /tmp/background-jobs-demo.log 2>&1 &
+demo_pid=$!
+curl --retry 15 --retry-delay 1 --retry-connrefused --fail-with-body -sS "http://localhost:$PORT/health"
+# Após criar/consultar jobs em outro terminal, pare e aguarde:
+kill -TERM "$demo_pid"
+wait "$demo_pid"
+# Preserve DATA_DIR e REDIS_PORT usados para iniciar o Redis:
+docker compose down
+docker compose up -d --wait redis
+# Reinicie o executor no mesmo armazenamento:
+dotnet build/bin/BackgroundJobs.Demo/debug/BackgroundJobs.Demo.dll > /tmp/background-jobs-demo.log 2>&1 &
+demo_pid=$!
+```
+
+Espere o health responder `200` antes de enviar pedidos; a consulta logo após iniciar pode falhar enquanto a escuta é preparada. Consulte os IDs guardados: argumentos, opções, estados finais, tentativas e históricos permanecem, e pendentes continuam processáveis. Os eventos da demo começam vazios a cada processo. Use novamente `kill -TERM` e `wait` para encerrar a instância iniciada; nunca mantenha dois executores no mesmo armazenamento.
+
+Para observar recuperação após queda, substitua a parada por `kill -KILL "$demo_pid"` enquanto `succeed-after` estiver em `processing` e aguarde sua saída com `wait` (o shell informa encerramento por sinal, normalmente código 137). Reinicie com o mesmo Redis e consulte o ID: a tentativa aberta fica `interrupted`; outra só é iniciada se restar orçamento. Efeitos externos podem repetir, exigindo idempotência do consumidor. Os testes de processos automatizam esse cenário e a parada com pendentes; a garantia não depende do processo intermediário de `dotnet run`.
 
 ## Demonstrar execução HTTP
 
@@ -333,6 +393,16 @@ A listagem retorna `200 { "items": [{ "id": "...", "name": "log-message", "state
 
 ## Validar
 
+Para os testes de processos, instale também o Redis nativo no Ubuntu/WSL:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y redis-server redis-tools
+redis-server --version
+```
+
+O executável de referência desta validação é Redis 7.0.15 dos pacotes Ubuntu 24.04; confira a versão efetivamente instalada. O executável é usado para lançar processos dedicados; nenhum serviço Redis do sistema precisa estar ativo. Um container Redis atende às suítes de prefixos, mas não fornece o executável Linux ao host. Para usar outra instalação nativa, informe seu caminho absoluto por `REDIS_SERVER_EXECUTABLE` e confira a versão; não é necessário extrair binários ou loaders de containers.
+
 A suíte completa requer Linux/WSL, Redis acessível por `REDIS_CONNECTION` e um executável `redis-server` para os testes de processos dedicados. Configure `REDIS_SERVER_EXECUTABLE` quando esse executável estiver fora do PATH. A seção de testes de processos abaixo descreve o comando separado e a opção de executar os contratos HTTP em outras plataformas.
 
 ```bash
@@ -358,7 +428,19 @@ A cobertura está nos [testes unitários](tests/BackgroundJobs.UnitTests), nos [
 
 Os testes HTTP de criação/consulta isolam o motor na composição de teste. Os testes de execução usam o motor ativo; os de configuração preservam a criação real do `JobServer` pelo `Program`, isolando configuração por host e chaves pela conexão de teste. Todos param o servidor antes da limpeza. Não há flag de produto para desativar o motor.
 
-O resultado verificado é build sem avisos ou erros e **733 testes aprovados** (220 unitários, 357 de integração e 156 HTTP, incluindo 11 de processos), sem falhas ou testes ignorados, com SDK 10.0.114 e Redis 7.0.15 (porta 16379 para testes de prefixos e portas isoladas nos testes de processos), AOF, `appendfsync always` e `noeviction`. A cobertura inclui limite e progresso dos workers, disputa pela mesma cabeça, FIFO com timestamps iguais, isolamento de erros de função, falha fatal global, espera por reservas/conclusões pendentes, inicialização e parada coordenadas. A integração verifica índices, snapshots e execução dos pendentes por nova instância após parada limpa.
+A verificação por suíte aprova **737 testes** (220 unitários, 357 de integração e 160 HTTP, incluindo 11 de processos), sem falhas ou ignorados. Restore e build aprovam com SDK 10.0.114; o build não apresenta avisos nem erros (13,42 s). O ambiente é Ubuntu 24.04.2 em Linux/WSL: integração e HTTP usam Redis **8.2.10** do Compose na porta 16389, enquanto os processos dedicados usam o executável nativo Redis **7.0.15** dos pacotes oficiais Ubuntu, com portas próprias. Ambos usam AOF, `appendfsync always` e `noeviction`.
+
+| Suíte | Aprovados | Duração reportada pelo runner |
+| --- | ---: | --- |
+| Unitários | 220 | 1 s |
+| Integração | 357 | 1 min 2 s |
+| HTTP, incluindo processos | 160 | 2 min 6 s |
+
+Os contratos HTTP incluem a aceitação dos limites `delayMs=0/60000` e `failTimes=0/10` com persistência antes do `202`, sem executar o handler no teste de fronteira. O consumidor console copiado literalmente desta página também compila e executa fora do checkout, com referência apenas à biblioteca e sem HTTP, confirmando ID, argumentos, contexto e histórico por consulta pública. Os recursos Lua são carregados do assembly sem copiar `src/`.
+
+A reprodução HTTP com um worker e Redis 8.2.10 confirmou health, criação, detalhe, listagem, eventos, deleção, reenfileiramento e erros `400/404/409`. O pedido imediato concluiu em 129,77 ms desde o início da criação até a consulta terminal; os intervalos de retry foram 615,175 e 626,009 ms para atraso de 500 ms. Foram registrados 13 eventos correlacionados por ID/tentativa. Recriar o Compose com o mesmo diretório de dados (caminho com espaços) preservou os detalhes completos de cinco jobs, incluindo argumentos, opções, estados, tentativas e históricos; outro diretório começou vazio, e o retorno ao primeiro manteve seu conjunto sem a escrita do diretório independente. Montagem em `/data` e configuração efetiva foram conferidas. Essas durações são observações técnicas locais e não medem esforço humano.
+
+As suítes verificam os dez critérios da spec, incluindo processos reais para SIGKILL/SIGTERM/SIGINT, recuperação com ambos os orçamentos e drenagem de função de 35 s. A cobertura inclui limite e progresso dos workers, disputa pela mesma cabeça, FIFO com timestamps iguais, isolamento de erros de função, falha fatal global, espera por reservas/conclusões pendentes, inicialização e parada coordenadas. A integração verifica índices, snapshots e execução dos pendentes por nova instância após parada limpa.
 
 As regressões de [reconciliação](tests/BackgroundJobs.IntegrationTests/ReconciliationTests.cs) controlam falha antes do envio, commit sem resposta, comando tardio e perda da leitura de confirmação sobre Redis real. Conferem que cada criação, tentativa, transição e ciclo manual é aplicado uma vez por operação lógica, inclusive após avanço concorrente, e que corrupção não confirma sucesso. A [disponibilidade](tests/BackgroundJobs.IntegrationTests/AvailabilityTests.cs) verifica repetidos episódios de suspensão, limite fixo de workers, diagnóstico, inicialização e cancelamento do host.
 
@@ -405,7 +487,7 @@ O critério de operações manuais foi demonstrado com processos reais da demo e
 
 São observações locais, sem garantia de tempo real. Para reproduzir, crie uma mensagem com `runAt` três segundos à frente, delete-a e consulte eventos depois desse horário; em seguida execute `fail-n-times` com `failTimes: 1`, `maxAttempts: 2`, `retryDelayMs: 500`, capture o detalhe final, reenfileire o mesmo ID e compare os prefixos de `history`/`attemptHistory`. As regressões duráveis estão em [ManagementTests](tests/BackgroundJobs.IntegrationTests/ManagementTests.cs), [ManagementConcurrencyTests](tests/BackgroundJobs.IntegrationTests/ManagementConcurrencyTests.cs), [ManagerTests](tests/BackgroundJobs.UnitTests/ManagerTests.cs) e [ManagementHttpTests](tests/BackgroundJobs.HttpTests/ManagementHttpTests.cs). Elas cobrem todos os estados, listagem paginada internamente e deduplicada, confirmação incerta com reconciliação sem efeitos duplicados, corrupção sem escrita parcial, ciclos de 64 bits, limites FIFO, snapshots, disputas controladas com reserva/promoção e progresso após descarte de uma página inteira de agendamentos.
 
-A validação usa Redis 8.2.10. Os testes de sinais executam processos nativos Linux/WSL; na verificação, o executável e suas bibliotecas vieram da imagem oficial `redis:8.2.10-alpine`. Para reprodução, forneça um executável nativo pelo PATH ou por `REDIS_SERVER_EXECUTABLE`. O armazenamento dos testes de prefixos pode usar o Compose ou Redis externo equivalente, configurado por `REDIS_CONNECTION`.
+As medições demonstrativas de execução, agendamento, operações manuais e recuperação apresentadas nesta seção usam Redis 8.2.10. Os testes de sinais executam processos nativos Linux/WSL; a versão de cada execução da suíte está identificada na síntese de resultados acima. Para reprodução, forneça um executável nativo pelo PATH ou por `REDIS_SERVER_EXECUTABLE`. O armazenamento dos testes de prefixos pode usar o Compose ou Redis externo equivalente, configurado por `REDIS_CONNECTION`.
 
 Recuperação automática e configuração `DATA_DIR` estão implementadas. A inicialização verifica todos os handlers, inclusive de finalizados, e a associação dos índices antes de recuperar resíduos em lotes de até 128. Cada recuperação preserva dados/ciclo/históricos, fecha a última tentativa e invalida a posse da tentativa aberta, preservando recibos de conclusões já confirmadas. Corrupção e relógio anterior à atualização falham explicitamente; uma falha mantém o motor indisponível e preserva `LastError`. Recuperações já confirmadas permanecem e uma nova instância retoma as restantes. Falhas transitórias durante inicialização ou processamento permitem reconciliação e retomada automática. A retomada de comunicação não marca funções vivas como interrompidas. Recibos por operação e geração do executor protegem transições e comandos atrasados; os metadados não aparecem no JSON HTTP, não expiram e crescem com as operações e históricos. Continua obrigatório usar um executor por armazenamento.
 
@@ -426,7 +508,7 @@ Os critérios 8–10 foram demonstrados por processos reais em Linux/WSL, com Re
 
 São observações locais, sem garantia de tempo real. A regressão permanente está em [ProcessLifecycleTests](tests/BackgroundJobs.HttpTests/ProcessLifecycleTests.cs), com processos controlados por [ProcessHost](tests/BackgroundJobs.HttpTests/ProcessHost.cs). [RecoveryTests de integração](tests/BackgroundJobs.IntegrationTests/RecoveryTests.cs) verificam ambos os orçamentos, FIFO, múltiplos ciclos, 270 resíduos em lotes limitados, deduplicação, metadados/índices corrompidos sem escrita parcial, tempo/sequência/ciclo extremos, confirmação antiga, recuperação parcial e resposta perdida. [RecoveryTests unitários](tests/BackgroundJobs.UnitTests/RecoveryTests.cs) verificam checagens completas de handlers, ordem de inicialização, prontidão, falhas e parada com operações admitidas.
 
-Os testes de processos requerem Linux/WSL, .NET e um executável Redis com AOF (8.2.10 usado na validação). Criam processos, diretórios e portas exclusivos e nunca reiniciam o serviço indicado por `REDIS_CONNECTION`. Configure o caminho quando `redis-server` não estiver no PATH:
+Os testes de processos requerem Linux/WSL, .NET e um executável Redis com AOF (7.0.15 na regressão completa; 8.2.10 nas medições demonstrativas). Criam processos, diretórios e portas exclusivos e nunca reiniciam o serviço indicado por `REDIS_CONNECTION`. Configure o caminho quando `redis-server` não estiver no PATH:
 
 ```bash
 REDIS_SERVER_EXECUTABLE=/caminho/redis-server \

@@ -45,6 +45,10 @@ public sealed partial class JobHttpTests : IAsyncLifetime
             if (validatorError is not null) throw validatorError;
             DemoJobValidation.ValidateLogMessage(args);
         });
+        registry.Register(DemoJobs.SucceedAfter, (_, _) => { executions++; return Task.CompletedTask; },
+            DemoJobValidation.ValidateSucceedAfter);
+        registry.Register(DemoJobs.FailNTimes, (_, _) => { executions++; return Task.CompletedTask; },
+            DemoJobValidation.ValidateFailNTimes);
         client = new RedisJobClient(registry.Contracts, connection, prefix, new Clock());
         manager = new RedisJobManager(connection, prefix);
         factory = new Factory(services =>
@@ -77,6 +81,30 @@ public sealed partial class JobHttpTests : IAsyncLifetime
     private static async Task<JsonElement> Body(HttpResponseMessage response) =>
         JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.Clone();
     private async Task AssertNoJobs() => Assert.Equal(0, await connection.GetDatabase().SetLengthAsync(prefix + ":jobs"));
+
+    [Theory]
+    [InlineData("succeed-after", "delayMs", 0)]
+    [InlineData("succeed-after", "delayMs", 60000)]
+    [InlineData("fail-n-times", "failTimes", 0)]
+    [InlineData("fail-n-times", "failTimes", 10)]
+    public async Task Numeric_demo_parameters_accept_inclusive_bounds_without_executing_handler(string name, string parameter, int value)
+    {
+        using var response = await Post(JsonSerializer.Serialize(new
+        {
+            job = name, @params = new Dictionary<string, int> { [parameter] = value }
+        }));
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var id = (await Body(response)).GetProperty("jobId").GetString()!;
+        var stored = Assert.IsType<JobDetails>(await manager.GetAsync(id));
+        Assert.Equal(name, stored.Name);
+        Assert.Equal(value, stored.Args.GetProperty(parameter).GetInt32());
+        Assert.Equal(JobState.Enqueued, stored.State);
+        Assert.Equal(3, stored.MaxAttempts);
+        Assert.Equal(1000, stored.RetryDelayMs);
+        Assert.Equal(0, stored.Attempts);
+        Assert.Empty(stored.AttemptHistory);
+        Assert.Equal(0, executions);
+    }
 
     [Theory]
     [InlineData("")]

@@ -2,11 +2,11 @@
 
 ## 1. Status e referências
 
-Este documento registra a arquitetura baseada na [especificação funcional](spec-base.md), distinguindo o código disponível dos componentes planejados.
+Este documento registra a arquitetura baseada na [especificação funcional](spec-base.md), descrevendo os componentes e as garantias disponíveis.
 
 A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados registro tipado, criação e consulta, reserva e conclusão atômicas e execução imediata com quantidade configurável de workers, padrão 4. `JobServer` oferece inicialização, disponibilidade e parada; `JobServerHostedService` o integra ao host. A demo executa os três jobs da spec e expõe criação, listagem, detalhe, deleção, reenfileiramento, eventos e health. Agendamentos e retries são promovidos e executados pela biblioteca. Gerenciamento preserva os históricos entre ciclos; recuperação após queda fecha tentativas interrompidas antes da prontidão.
 
-A entrega prevista é uma biblioteca com motor próprio de processamento e uma aplicação demonstrativa. A biblioteca executa as funções dentro do processo da aplicação consumidora; Redis é o serviço externo de armazenamento.
+A solução contém uma biblioteca com motor próprio de processamento e uma aplicação demonstrativa. A biblioteca executa as funções dentro do processo da aplicação consumidora; Redis é o serviço externo de armazenamento.
 
 ## 2. Visão geral
 
@@ -516,7 +516,7 @@ Se houver encerramento forçado, a próxima inicialização recupera resíduos v
 
 ## 12. Persistência e configuração local
 
-Preservar a configuração já prevista para Redis:
+O Redis usa a seguinte configuração:
 
 - `appendonly yes`.
 - `appendfsync always`.
@@ -638,7 +638,7 @@ Além dos cenários, verificar corpos de erro, campos obrigatórios, opções pa
 
 ### 15.3 Compatibilidade dos contratos persistidos
 
-Acrescentar os seguintes cenários de validação da arquitetura:
+A suíte `ContractEvolutionTests` verifica os seguintes cenários da arquitetura:
 
 | Cenário | Resultado esperado |
 | --- | --- |
@@ -674,5 +674,3 @@ Acrescentar os seguintes cenários de validação da arquitetura:
 Permanecem fora do escopo múltiplas filas, prioridades, recorrência, dependências, exclusão por chave, hooks públicos, timeout de jobs, cancelamento em execução, retenção automática, autenticação e interface gráfica.
 
 A solução está funcionalmente pronta quando satisfaz os critérios de aceite e os contratos HTTP. A entrega inclui biblioteca, demo, exemplo de uso sem HTTP, instruções de instalação, execução, teste e reinício, além das evidências de validação e limitações encontradas.
-
-Registrar também o workflow do estudo: ferramentas e modelos, conversas com agentes, artefatos, tempo humano aproximado, decisões e retrabalhos. Tokens e custo entram no registro quando disponíveis.
