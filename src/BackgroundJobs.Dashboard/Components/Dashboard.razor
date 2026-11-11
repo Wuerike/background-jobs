@@ -19,10 +19,6 @@
     <a class="brand" href="@ListUrl()"><span class="brand-symbol"><Icon /></span><span>Background<span class="brand-light">Jobs</span><small>PAINEL DE OPERAÇÕES</small></span></a>
     <button class="mobile-menu" @onclick="() => menuOpen = !menuOpen" aria-expanded="@menuOpen">☰ Menu</button>
     <nav class="@(menuOpen ? "open" : "")" aria-label="Navegação principal">
-        <span class="nav-label">WORKSPACE</span>
-        <a class="@(stateFilter is null && selectedId is null ? "active" : "")" href="@ListUrl()"><Icon Name="overview" />Visão geral</a>
-        <a href="@ListUrl()"><Icon Name="jobs" />Todos os jobs<span class="nav-count">@(observation?.Items.Count.ToString() ?? "—")</span></a>
-        <span class="nav-label">MONITORAMENTO</span>
         @foreach (var state in States)
         {
             <a class="@(stateFilter == state ? "active" : "")" href="@StateUrl(state)"><Icon Name="@Presentation.Key(state)" />@Presentation.State(state)<span class="nav-count">@(observation?.Counts[state].ToString() ?? "—")</span></a>
@@ -31,10 +27,18 @@
     <div class="sidebar-bottom"><span class="storage-dot"></span><strong>@Options.StorageLabel</strong><small>Armazenamento monitorado<br />Executor: prontidão não informada</small></div>
 </aside>
 <main id="main-content" tabindex="-1">
-    <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> Monitoramento @if (selectedId is not null) { <span>/</span><strong>Detalhe do job</strong> }</div><span class="environment"><span></span> Redis</span></header>
+    <header class="topbar">
+        <div class="breadcrumb">Workspace <span>/</span> Monitoramento @if (selectedId is not null) { <span>/</span><strong>Detalhe do job</strong> }</div>
+        <div class="header-actions">
+            <div class="refresh-controls"><label class="interval-label">Atualização<select disabled="@(module is null)" aria-label="Intervalo de atualização" @bind="refreshSeconds"><option value="0">Pausada</option><option value="1">A cada 1 s</option><option value="5">A cada 5 s</option><option value="10">A cada 10 s</option><option value="30">A cada 30 s</option><option value="60">A cada 60 s</option></select></label><button class="button" disabled="@(loading || module is null)" @onclick="ManualRefresh"><Icon Name="refresh" />Atualizar</button></div>
+            <span class="environment"><span></span> Redis</span>
+        </div>
+    </header>
     <div class="content">
-        <div class="page-heading"><div><div class="eyebrow">OPERAÇÃO EM TEMPO REAL</div><h1>@(selectedId is null ? "Seus jobs, sob controle." : "Detalhe do job")</h1><p>@(selectedId is null ? "Acompanhe a fila, investigue falhas e mantenha tudo em movimento." : "Parâmetros, tentativas e cada mudança de estado em um só lugar.")</p></div>
-        <div class="refresh-controls"><label class="interval-label">Atualização<select disabled="@(module is null)" aria-label="Intervalo de atualização" @bind="refreshSeconds"><option value="0">Pausada</option><option value="5">A cada 5 s</option><option value="10">A cada 10 s</option><option value="30">A cada 30 s</option><option value="60">A cada 60 s</option></select></label><button class="button" disabled="@(loading || module is null)" @onclick="ManualRefresh"><Icon Name="refresh" />Atualizar</button></div></div>
+        @if (selectedId is not null)
+        {
+            <div class="page-heading"><h1>Detalhe do job</h1><p>Parâmetros, tentativas e cada mudança de estado em um só lugar.</p></div>
+        }
         <div class="connection-line" role="status"><span class="status-light @(error is null && observation is not null ? "online" : "offline")"></span>@(loading ? "Consultando armazenamento…" : error is not null ? "Dados desatualizados · consulta indisponível" : observation is null ? "Aguardando primeira leitura" : "Leitura do armazenamento concluída")<span class="last-read">Último sucesso: @Presentation.Date(lastSuccess)</span></div>
         @if (error is not null) { <div class="notice danger" role="alert"><strong>Não foi possível atualizar.</strong> @error Os últimos dados disponíveis são mantidos abaixo. <button class="text-button" @onclick="ManualRefresh" disabled="@(loading || module is null)">Tentar novamente</button></div> }
         @if (feedback is not null) { <div class="notice" role="status">@feedback <button class="text-button" @onclick="() => feedback = null" aria-label="Dispensar mensagem">×</button></div> }
@@ -42,18 +46,10 @@
         else if (observation is null) { <div class="skeleton" aria-busy="@loading"><div></div><div></div><div></div><p>@(error is null ? "Preparando o painel…" : "A leitura estará disponível quando a conexão for restabelecida.")</p></div> }
         else if (selectedId is null)
         {
-            <section class="metrics" aria-label="Jobs por estado">
-                @foreach (var state in States)
-                {
-                    <a class="metric @Presentation.Key(state) @(stateFilter == state ? "selected" : "")" href="@StateUrl(state)"><div class="metric-top"><span>@Presentation.State(state)</span><span class="metric-icon"><Icon Name="@Presentation.Key(state)" /></span></div><strong>@observation.Counts[state]</strong><small>@StateDescription(state) <span>↗</span></small></a>
-                }
-            </section>
-            <section class="overview-strip" aria-label="Resumo da observação"><div><span class="eyebrow">PANORAMA DA FILA</span><h2>@observation.Items.Count <span>jobs observados</span></h2><div class="distribution">@foreach (var state in States) { <span class="@Presentation.Key(state)" style="width: @(observation.Items.Count == 0 ? 0 : 100.0 * observation.Counts[state] / observation.Items.Count)%" title="@Presentation.State(state): @observation.Counts[state]"></span> }</div></div><div class="retry-summary"><Icon Name="scheduled" /><div><strong>@observation.Retries aguardando retry</strong><small>Nova tentativa após o atraso configurado</small></div><a href="@StateUrl(JobState.Scheduled)">Ver agendados →</a></div></section>
             <section class="panel jobs-panel" aria-labelledby="jobs-heading">
                 <div class="panel-heading"><div><h2 id="jobs-heading">@(stateFilter is { } currentState ? Presentation.State(currentState) : "Todos os jobs") <span class="count-pill">@tablePage?.Total</span></h2><p>Encontre um job e acompanhe sua execução.</p></div><a class="text-button" href="@ListUrl()">Limpar filtros</a></div>
                 <form class="filters" @onsubmit="ApplyFilters" @onsubmit:preventDefault>
                     <label class="search-field"><Icon Name="search" /><input disabled="@(module is null)" aria-label="Buscar por ID ou nome" placeholder="Buscar por nome ou ID do job…" @bind="search" maxlength="200" /></label>
-                    <label>Estado<select disabled="@(module is null)" @bind="stateInput"><option value="">Todos os estados</option>@foreach (var state in States) { <option value="@Presentation.Key(state)">@Presentation.State(state)</option> }</select></label>
                     <label>Criados desde (UTC)<input disabled="@(module is null)" type="date" @bind="fromDate" @bind:format="yyyy-MM-dd" /></label>
                     <label>Criados antes de (UTC)<input disabled="@(module is null)" type="date" @bind="untilDate" @bind:format="yyyy-MM-dd" /></label>
                     <label>Ordenar<select disabled="@(module is null)" @bind="sortInput"><option value="Newest">Mais recentes</option><option value="Oldest">Mais antigos</option><option value="Updated">Última atualização</option><option value="Name">Nome do contrato</option></select></label>

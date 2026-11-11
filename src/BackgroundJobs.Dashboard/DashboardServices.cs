@@ -46,7 +46,7 @@ public sealed class DashboardObservationCache(RedisJobMonitor monitor, Dashboard
         await gate.WaitAsync(cancellationToken);
         try
         {
-            if (latest is not null && cachedVersion == Volatile.Read(ref version) && DateTimeOffset.UtcNow - latest.FinishedAt < TimeSpan.FromSeconds(5)) return latest;
+            if (latest is not null && cachedVersion == Volatile.Read(ref version) && DateTimeOffset.UtcNow - latest.FinishedAt < TimeSpan.FromSeconds(1)) return latest;
             var readVersion = Volatile.Read(ref version);
             latest = await monitor.ReadAsync(options.MaxJobs, cancellationToken);
             cachedVersion = readVersion;

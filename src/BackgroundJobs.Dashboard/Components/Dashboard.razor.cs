@@ -23,7 +23,7 @@ public partial class Dashboard
     private JobState? stateFilter;
     private JobMonitorQuery query = new();
     private bool loading, mutating, requeue, menuOpen, forbidden, disposed;
-    private int refreshSeconds = 10;
+    private int refreshSeconds = 1;
     private DateTimeOffset? lastSuccess;
     private DateTimeOffset lastRequest, now = DateTimeOffset.UtcNow;
     private IJSObjectReference? module;
@@ -197,12 +197,6 @@ public partial class Dashboard
         Navigation.NavigateTo(QueryHelpers.AddQueryString(ListUrl(), values));
     }
 
-    private static string StateDescription(JobState state) => state switch
-    {
-        JobState.Enqueued => "Prontos para executar", JobState.Processing => "Tentativas em andamento",
-        JobState.Succeeded => "Finalizados com sucesso", JobState.Failed => "Tentativas esgotadas",
-        JobState.Scheduled => "Agendamentos e retries", _ => "Pendências removidas"
-    };
     private string ItemTime(JobMonitorItem item) => item.State switch
     {
         JobState.Enqueued => Presentation.Duration(now - item.UpdatedAt),
