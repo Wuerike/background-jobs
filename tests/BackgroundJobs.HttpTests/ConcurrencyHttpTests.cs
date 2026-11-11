@@ -168,7 +168,7 @@ public sealed partial class ConcurrencyHttpTests
     {
         await using var host = new Host();
         var error = await Assert.ThrowsAnyAsync<Exception>(() => host.Start(setting));
-        Assert.Contains("WORKER_COUNT", error.ToString());
+        Assert.True(error.ToString().Contains("WORKER_COUNT", StringComparison.Ordinal), error.ToString());
         Assert.Equal(0, await host.Connection.GetDatabase().SetLengthAsync(host.Prefix + ":jobs"));
     }
 

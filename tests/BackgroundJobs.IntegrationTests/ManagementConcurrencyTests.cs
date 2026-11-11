@@ -150,13 +150,13 @@ public sealed partial class ProcessingTests
     }
 
     [Fact]
-    public async Task Old_completion_never_confirms_new_cycle_before_during_or_after_new_attempt()
+    public async Task Old_completion_confirms_only_its_result_without_changing_new_cycle()
     {
         var old = new AttemptCompletion(await Claim(), now.AddTicks(2), null); await store.CompleteAsync(old);
         await Manager().RequeueAsync("a");
         async Task Reject()
         {
-            var before = await Dump(); await Assert.ThrowsAnyAsync<Exception>(() => store.CompleteAsync(old)); Assert.Equal(before, await Dump());
+            var before = await Dump(); await store.CompleteAsync(old); Assert.Equal(before, await Dump());
         }
         await Reject();
         var next = (await store.TryClaimAsync((await store.PeekAsync())!, now.AddSeconds(2), "new"))!;
@@ -391,7 +391,7 @@ public sealed partial class ProcessingTests
     {
         var persisted = Signal(); var release = Signal();
         async Task<RedisResult> Pause(Task<RedisResult> response)
-        { var result = await response; persisted.SetResult(); await release.Task; return result; }
+        { var result = await response; persisted.TrySetResult(); await release.Task; return result; }
         var database = ForwardingProxy.Create<IDatabase>(db, (proxy, method, args) =>
         {
             var result = proxy.Call(method, args);

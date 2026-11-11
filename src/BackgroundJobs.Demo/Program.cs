@@ -21,7 +21,12 @@ new DemoJobHandlers(events).Register(jobs);
 builder.Services.AddSingleton(events);
 builder.Services.AddSingleton(jobs);
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
-    ConnectionMultiplexer.Connect(builder.Configuration["REDIS_CONNECTION"] ?? "127.0.0.1:6379"));
+{
+    var configuration = ConfigurationOptions.Parse(builder.Configuration["REDIS_CONNECTION"] ?? "127.0.0.1:6379");
+    configuration.AbortOnConnectFail = false;
+    configuration.BacklogPolicy = BacklogPolicy.FailFast;
+    return ConnectionMultiplexer.Connect(configuration);
+});
 builder.Services.AddSingleton<IJobClient>(services => new RedisJobClient(
     services.GetRequiredService<JobRegistry>().Contracts, services.GetRequiredService<IConnectionMultiplexer>()));
 builder.Services.AddSingleton<IJobManager>(services => new RedisJobManager(services.GetRequiredService<IConnectionMultiplexer>()));
@@ -40,6 +45,8 @@ builder.Services.AddHostedService<JobServerHostedService>();
 builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = Timeout.InfiniteTimeSpan);
 
 var app = builder.Build();
+// Construct and validate the executor before the host begins startup.
+_ = app.Services.GetRequiredService<JobServer>();
 // Keep unexpected failures generic even in Development. Details stay in server logs.
 app.Use(async (context, next) =>
 {

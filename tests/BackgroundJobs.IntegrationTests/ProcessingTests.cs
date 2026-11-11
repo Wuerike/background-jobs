@@ -43,7 +43,7 @@ public sealed partial class ProcessingTests : IAsyncLifetime
     private async Task<JobDetails> Detail(string id = "a") => Assert.IsType<JobDetails>(await store.GetAsync(id));
     private async Task<string[]> Dump()
     {
-        var keys = connection.GetServer(connection.GetEndPoints()[0]).Keys(db.Database, prefix + ":*").OrderBy(k => k.ToString()).ToArray();
+        var keys = connection.GetServer(connection.GetEndPoints()[0]).Keys(db.Database, prefix + ":*").Where(k => !k.ToString().Contains(":operation:")).OrderBy(k => k.ToString()).ToArray();
         var values = new List<string>();
         // Redis can rehash a set during a read-only scan, changing DUMP ordering.
         // Compare its logical members canonically; other key dumps retain exact bytes.

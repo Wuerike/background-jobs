@@ -7,7 +7,7 @@ using Xunit.Abstractions;
 namespace BackgroundJobs.HttpTests;
 
 [Trait("Category", "ProcessLifecycle")]
-public sealed class ProcessLifecycleTests(ITestOutputHelper output)
+public sealed partial class ProcessLifecycleTests(ITestOutputHelper output)
 {
     private static string Json(JobDetails job) => JsonSerializer.Serialize(job);
 

@@ -158,7 +158,7 @@ public sealed partial class ProcessingTests
             var next = (await store.TryClaimAsync(current, now.AddTicks(3), "next"))!;
             Assert.Equal(2, next.Attempt);
             before = await Dump();
-            await Assert.ThrowsAsync<InvalidDataException>(() => store.CompleteAsync(completion));
+            await store.CompleteAsync(completion);
             Assert.Equal(before, await Dump());
         }
         finally { release.TrySetResult(); }

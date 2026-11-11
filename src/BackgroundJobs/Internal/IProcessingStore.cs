@@ -16,10 +16,15 @@ internal sealed record JobReference(string Id, string Name, JobState State);
 
 internal interface IProcessingStore
 {
+    Task BeginSessionAsync() => Task.CompletedTask;
+    Task ValidateSessionAsync() => Task.CompletedTask;
+    Task ValidateProcessingIndexAsync() => Task.CompletedTask;
     IAsyncEnumerable<JobReference> ReadReferencesAsync();
     Task<bool> HasProcessingAsync();
     Task<IReadOnlyList<RecoveryCandidate>> ReadRecoveryAsync();
     Task<RecoveryResult> TryRecoverAsync(RecoveryCandidate candidate, DateTimeOffset now);
+    Task<RecoveryResult> TryRecoverAsync(RecoveryCandidate candidate, DateTimeOffset now, string operation) => TryRecoverAsync(candidate, now);
+    Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now, string operation) => TryPromoteAsync(candidate, now);
     Task<ScheduledBatch> ReadScheduledAsync(DateTimeOffset now, long offset);
     Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now);
     Task<JobCandidate?> PeekAsync();

@@ -252,10 +252,10 @@ public sealed class RedisTests : IAsyncLifetime
         var keys = store.Keys(request.Id);
         Assert.Equal(1, await db.ListLengthAsync(keys[1]));
         Assert.Equal("1", (string?)await db.StringGetAsync(keys[6]));
-        await db.HashSetAsync(keys[0], "state", "succeeded");
+        await store.DeleteAsync(request.Id, new Clock());
         await store.CreateAsync(request);
-        Assert.Equal("succeeded", (string?)await db.HashGetAsync(keys[0], "state"));
-        Assert.Equal(1, await db.ListLengthAsync(keys[1]));
+        Assert.Equal("deleted", (string?)await db.HashGetAsync(keys[0], "state"));
+        Assert.Equal(2, await db.ListLengthAsync(keys[1]));
         var before = await Snapshot();
         await Assert.ThrowsAsync<RedisServerException>(() => store.CreateAsync(Request(request.Id, message: "different")));
         Assert.Equal(before, await Snapshot());

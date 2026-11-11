@@ -11,12 +11,95 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
 {
     private static readonly string CreateScript = LoadScript("create");
     private static readonly string GetScript = LoadScript("get");
-    private static readonly string ClaimScript = LoadScript("processing-common") + "\n" + LoadScript("claim");
-    private static readonly string CompleteScript = LoadScript("processing-common") + "\n" + LoadScript("complete");
-    private static readonly string PromoteScript = LoadScript("processing-common") + "\n" + LoadScript("promote");
-    private static readonly string ManageScript = LoadScript("processing-common") + "\n" + LoadScript("manage");
+    private static readonly string ClaimScript = LoadScript("claim");
+    private static readonly string CompleteScript = LoadScript("complete");
+    private static readonly string PromoteScript = LoadScript("promote");
+    private static readonly string ManageScript = LoadScript("manage");
     private static readonly string ScheduledReadScript = LoadScript("processing-common") + "\n" + LoadScript("read-scheduled");
-    private static readonly string RecoverScript = LoadScript("processing-common") + "\n" + LoadScript("recover");
+    private static readonly string RecoverScript = LoadScript("recover");
+    private static readonly string CommonScript = LoadScript("processing-common");
+    private static readonly string ReceiptScript = LoadScript("receipt");
+    private string? generation;
+    private (RedisValue Previous, string Next)? sessionEnvelope;
+    internal event Action<Exception>? TransportFailure;
+
+    private string ReceiptKey(string id, string operation) => $"{prefix}:job:{id}:operation:{operation}";
+    private static string Digest(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    private string WrappedScript(string script) => CommonScript + "\n" + ReceiptScript + "\n" +
+        "local function apply()\n" + script + "\nend\n" + """
+        local result = apply()
+        if type(result) == 'table' and result.err then return result end
+        -- A zero management result proves progress without making a decision.
+        if result ~= 0 and not (type(result) == 'table' and result[1] == 0) then
+            local snapshot = ''
+            if redis.call('EXISTS', KEYS[1]) == 1 then
+                snapshot = cjson.encode({redis.call('HGETALL', KEYS[1]), redis.call('LRANGE', KEYS[2], 0, -1), redis.call('LRANGE', KEYS[3], 0, -1)})
+            end
+            local checksum = redis.sha1hex(operationIdentity .. '|' .. cjson.encode(result) .. '|' .. snapshot)
+            redis.call('SET', receiptKey, cjson.encode({identity = operationIdentity, result = result, snapshot = snapshot, checksum = checksum}))
+        end
+        return result
+        """;
+
+    private async Task<RedisResult?> ReadReceiptAsync(string id, string operation)
+    {
+        var result = await database.ScriptEvaluateAsync(CommonScript + "\n" + ReceiptScript + "\nreturn false",
+            [.. ProcessingKeys(id), ReceiptKey(id, operation), $"{prefix}:executor"], [id, operation, generation ?? ""]).ConfigureAwait(false);
+        if (result.IsNull) return null;
+        if (await database.KeyExistsAsync(Keys(id)[0]).ConfigureAwait(false))
+            await ReadIndexedSnapshot(id).ConfigureAwait(false);
+        return result;
+    }
+
+    private async Task<RedisResult> MutateAsync(string script, string id, RedisValue[] args, string? operation = null)
+    {
+        operation ??= Digest(script + JsonSerializer.Serialize(args.Select(v => v.ToString())));
+        RedisKey[] keys = [.. ProcessingKeys(id), ReceiptKey(id, operation), $"{prefix}:executor"];
+        RedisValue[] values = [.. args, operation, generation ?? ""];
+        try { return await database.ScriptEvaluateAsync(WrappedScript(script), keys, values).ConfigureAwait(false); }
+        catch (Exception error) when (RedisTransport.IsTransient(error))
+        {
+            TransportFailure?.Invoke(error);
+            var recorded = await ReadReceiptAsync(id, operation).ConfigureAwait(false);
+            if (recorded is { } confirmed) return confirmed;
+            return await database.ScriptEvaluateAsync(WrappedScript(script), keys, values).ConfigureAwait(false);
+        }
+    }
+
+    public async Task BeginSessionAsync()
+    {
+        if (sessionEnvelope is null)
+        {
+            var previousValue = await database.StringGetAsync($"{prefix}:executor").ConfigureAwait(false);
+            sessionEnvelope = (previousValue.IsNull ? "" : previousValue, Guid.NewGuid().ToString("N"));
+        }
+        var (previous, next) = sessionEnvelope.Value;
+        const string script = """
+            local current = redis.call('GET', KEYS[1]) or ''
+            if current == ARGV[2] then return 1 end
+            if current ~= ARGV[1] then return redis.error_reply('Executor generation changed') end
+            redis.call('SET', KEYS[1], ARGV[2])
+            return 1
+            """;
+        // Keep this envelope through transport failures; a late predecessor cannot
+        // overwrite the generation installed by a subsequent executor.
+        generation = next;
+        await RedisTransport.ReadAsync(() => database.ScriptEvaluateAsync(script, [$"{prefix}:executor"], [previous, next])).ConfigureAwait(false);
+    }
+
+    public async Task ValidateSessionAsync()
+    {
+        if (generation is not null && await database.StringGetAsync($"{prefix}:executor").ConfigureAwait(false) != generation)
+            throw new InvalidDataException("Executor generation is missing or has changed; storage continuity cannot be confirmed.");
+    }
+
+    public async Task ValidateProcessingIndexAsync()
+    {
+        await foreach (var value in database.SetScanAsync($"{prefix}:processing", pageSize: RecoveryBatchSize).ConfigureAwait(false))
+            await ReadIndexedSnapshot((string)value!).ConfigureAwait(false);
+    }
+
     internal const int RecoveryBatchSize = 128;
     internal const int ScheduledBatchSize = 128;
     private readonly IDatabase database;
@@ -50,18 +133,44 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         // Hash a length-delimited, deterministic representation of the immutable creation.
         var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(values))));
         RedisValue[] args = [.. values.Select(v => (RedisValue)v), identity];
-        var result = await database.ScriptEvaluateAsync(CreateScript, Keys(job.Id), args).ConfigureAwait(false);
+        RedisResult result;
+        try { result = await database.ScriptEvaluateAsync(CreateScript, Keys(job.Id), args).ConfigureAwait(false); }
+        catch (Exception error) when (RedisTransport.IsTransient(error))
+        {
+            var raw = (RedisResult[])(await database.ScriptEvaluateAsync(GetScript, Keys(job.Id)[..3]).ConfigureAwait(false))!;
+            if (raw.Length != 0)
+            {
+                await ConfirmCreationAsync(job, identity, values).ConfigureAwait(false);
+                return;
+            }
+            // A read of absence cannot rule out a late original command. The
+            // identical creation script deduplicates both possible arrival orders.
+            result = await database.ScriptEvaluateAsync(CreateScript, Keys(job.Id), args).ConfigureAwait(false);
+        }
         if ((long)result != 1) throw new InvalidDataException("Redis did not confirm job creation.");
+        await ConfirmCreationAsync(job, identity, values).ConfigureAwait(false);
+    }
+
+    private async Task ConfirmCreationAsync(NewJob job, string identity, string[] values)
+    {
+        var (current, _, fields) = await ReadIndexedSnapshot(job.Id).ConfigureAwait(false);
+        if (fields.GetValueOrDefault("creationIdentity") != identity || current.Name != values[1] ||
+            current.Args.GetRawText() != values[2] || current.MaxAttempts != job.Prepared.MaxAttempts ||
+            current.RetryDelayMs != job.Prepared.RetryDelayMs || current.CreatedAt != job.Prepared.CreatedAt ||
+            current.History[0] != job.Prepared.History[0])
+            throw new InvalidDataException("Creation identity or immutable data mismatch.");
     }
 
     public async Task<JobDetails?> GetAsync(string id)
     {
         ArgumentNullException.ThrowIfNull(id);
-        var result = (RedisResult[])(await database.ScriptEvaluateAsync(GetScript, Keys(id)[..3]).ConfigureAwait(false))!;
+        var result = (RedisResult[])(await RedisTransport.ReadAsync(() => database.ScriptEvaluateAsync(GetScript, Keys(id)[..3])).ConfigureAwait(false))!;
         return result.Length == 0 ? null : JobCodec.Read(id, result);
     }
 
-    public async Task<IReadOnlyList<JobSummary>> ListAsync()
+    public Task<IReadOnlyList<JobSummary>> ListAsync() => RedisTransport.ReadAsync(ListCoreAsync);
+
+    private async Task<IReadOnlyList<JobSummary>> ListCoreAsync()
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var items = new List<JobSummary>();
@@ -81,9 +190,10 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
     private async Task<JobOperationResult> ManageAsync(string id, TimeProvider clock, bool requeue)
     {
         ArgumentNullException.ThrowIfNull(id);
+        var operation = "manual-" + Guid.NewGuid().ToString("N");
         while (true)
         {
-            var raw = (RedisResult[])(await database.ScriptEvaluateAsync(GetScript, Keys(id)[..3]).ConfigureAwait(false))!;
+            var raw = (RedisResult[])(await RedisTransport.ReadAsync(() => database.ScriptEvaluateAsync(GetScript, Keys(id)[..3])).ConfigureAwait(false))!;
             var snapshot = "";
             var at = "";
             var history = "";
@@ -106,8 +216,8 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
                     if (requeue) extra = checked(cycle + 1).ToString(CultureInfo.InvariantCulture);
                 }
             }
-            var result = (long)await database.ScriptEvaluateAsync(ManageScript, ProcessingKeys(id),
-                [id, snapshot, requeue ? "requeue" : "delete", at, history, extra]).ConfigureAwait(false);
+            var result = (long)await MutateAsync(ManageScript, id,
+                [id, snapshot, requeue ? "requeue" : "delete", at, history, extra], operation).ConfigureAwait(false);
             switch (result)
             {
                 case 1: return JobOperationResult.Applied;
@@ -225,7 +335,10 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         return candidates;
     }
 
-    public async Task<RecoveryResult> TryRecoverAsync(RecoveryCandidate candidate, DateTimeOffset now)
+    public Task<RecoveryResult> TryRecoverAsync(RecoveryCandidate candidate, DateTimeOffset now) =>
+        TryRecoverAsync(candidate, now, Guid.NewGuid().ToString("N"));
+
+    public async Task<RecoveryResult> TryRecoverAsync(RecoveryCandidate candidate, DateTimeOffset now, string operation)
     {
         var job = candidate.Job;
         now = now.ToUniversalTime();
@@ -238,8 +351,8 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         var attempt = JsonSerializer.Serialize(new { attempt = open.Attempt, startedAt = JobCodec.DateText(open.StartedAt),
             finishedAt = at, outcome = "interrupted", error = "Execution interrupted by process termination." });
         var history = JsonSerializer.Serialize(new { state, at, reason = "interrupted execution recovered" });
-        var result = (RedisResult[])(await database.ScriptEvaluateAsync(RecoverScript, ProcessingKeys(job.Id),
-            [job.Id, candidate.Snapshot, at, state, attempt, history]).ConfigureAwait(false))!;
+        var result = (RedisResult[])(await MutateAsync(RecoverScript, job.Id,
+            [job.Id, candidate.Snapshot, at, state, attempt, history], operation).ConfigureAwait(false))!;
         if (result.Length == 1 && (long)result[0] == 1) return RecoveryResult.Recovered;
         if (result.Length == 5 && (long)result[0] == 0)
         {
@@ -300,7 +413,10 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         return new ScheduledBatch(candidates, entries.Length);
     }
 
-    public async Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now)
+    public Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now) =>
+        TryPromoteAsync(candidate, now, Guid.NewGuid().ToString("N"));
+
+    public async Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now, string operation)
     {
         var job = candidate.Job;
         now = now.ToUniversalTime();
@@ -309,9 +425,9 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
             throw new InvalidDataException("Invalid promotion eligibility.");
         var history = JsonSerializer.Serialize(new { state = "enqueued", at = JobCodec.DateText(now),
             reason = job.Attempts == 0 ? "schedule eligible" : "retry eligible" });
-        var result = (RedisResult[])(await database.ScriptEvaluateAsync(PromoteScript, ProcessingKeys(job.Id),
+        var result = (RedisResult[])(await MutateAsync(PromoteScript, job.Id,
             [job.Id, candidate.Snapshot, candidate.Score.ToString("R", CultureInfo.InvariantCulture),
-             JobCodec.DateText(due), JobCodec.DateText(now), history]).ConfigureAwait(false))!;
+             JobCodec.DateText(due), JobCodec.DateText(now), history], operation).ConfigureAwait(false))!;
         if (result.Length == 1 && (long)result[0] == 1) return PromotionResult.Promoted;
         if (result.Length == 5 && (long)result[0] == 0)
         {
@@ -354,9 +470,22 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         var attempt = JsonSerializer.Serialize(new { attempt = number, startedAt = JobCodec.DateText(startedAt),
             finishedAt = (string?)null, outcome = (string?)null, error = (string?)null });
         var history = JsonSerializer.Serialize(new { state = "processing", at = JobCodec.DateText(startedAt), reason = "execution started" });
-        var result = await database.ScriptEvaluateAsync(ClaimScript, ProcessingKeys(job.Id),
+        var result = await MutateAsync(ClaimScript, job.Id,
             [job.Id, candidate.Snapshot, candidate.Cycle, token, JobCodec.DateText(startedAt), attempt, history, candidate.Position.ToString("R", CultureInfo.InvariantCulture)]).ConfigureAwait(false);
-        return (long)result == 0 ? null : new ClaimedJob(job, number, candidate.Cycle, token, startedAt);
+        if ((long)result == 0) return null;
+        if ((long)result != 1) throw new InvalidDataException("Redis did not confirm reservation.");
+        var (current, _, fields) = await ReadIndexedSnapshot(job.Id).ConfigureAwait(false);
+        if (current.State != JobState.Processing || current.Attempts != number ||
+            fields.GetValueOrDefault("cycle", "0") != candidate.Cycle || fields.GetValueOrDefault("attemptToken") != token ||
+            fields.GetValueOrDefault("attemptIndex") != job.AttemptHistory.Count.ToString(CultureInfo.InvariantCulture) ||
+            current.AttemptHistory.Count != job.AttemptHistory.Count + 1 ||
+            current.AttemptHistory[^1].StartedAt != startedAt || current.AttemptHistory[^1].FinishedAt is not null ||
+            current.Name != job.Name || current.Args.GetRawText() != job.Args.GetRawText() ||
+            current.CreatedAt != job.CreatedAt || current.MaxAttempts != job.MaxAttempts || current.RetryDelayMs != job.RetryDelayMs ||
+            !current.AttemptHistory.Take(job.AttemptHistory.Count).SequenceEqual(job.AttemptHistory) ||
+            !current.History.Take(job.History.Count).SequenceEqual(job.History))
+            throw new InvalidDataException("Reservation ownership or immutable data could not be confirmed.");
+        return new ClaimedJob(job, number, candidate.Cycle, token, startedAt);
     }
 
     public async Task CompleteAsync(AttemptCompletion completion)
@@ -375,6 +504,13 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
             reason = success ? "execution succeeded" : state == "scheduled" ? "retry scheduled" : "attempts exhausted" });
         var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new[] {
             job.Id, claim.Cycle, claim.Token, attempt, history, due is { } d ? JobCodec.DateText(d) : "" }))));
+        var recorded = await ReadReceiptAsync(job.Id, "complete-" + identity).ConfigureAwait(false);
+        if (recorded is { } confirmed)
+        {
+            if (confirmed.Resp2Type != ResultType.Integer || (long)confirmed != 1)
+                throw new InvalidDataException("Invalid completion receipt decision.");
+            return;
+        }
         var (current, snapshot, fields) = await ReadProcessingSnapshot(job.Id).ConfigureAwait(false);
         if (fields.GetValueOrDefault("completionIdentity") != identity)
         {
@@ -387,10 +523,10 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
                 current.MaxAttempts != job.MaxAttempts || current.RetryDelayMs != job.RetryDelayMs)
                 throw new InvalidDataException($"Invalid open attempt for '{job.Id}'.");
         }
-        var result = await database.ScriptEvaluateAsync(CompleteScript, ProcessingKeys(job.Id),
+        var result = await MutateAsync(CompleteScript, job.Id,
             [job.Id, snapshot, claim.Cycle, claim.Token, identity, JobCodec.DateText(finish), state,
              due is { } at ? JobCodec.DateText(at) : "", due is { } date ? JobCodec.ScheduledScore(date).ToString(CultureInfo.InvariantCulture) : "",
-             attempt, history]).ConfigureAwait(false);
+             attempt, history], "complete-" + identity).ConfigureAwait(false);
         if ((long)result != 1) throw new InvalidDataException("Redis did not confirm completion.");
     }
 
