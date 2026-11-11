@@ -4,7 +4,7 @@ Data da análise: 11/11/2026. Autor da análise: Codex. Objeto: o trabalho de Wu
 
 ## Avaliação geral
 
-Sua metodologia combina **especificação estável, exploração assistida de decisões, planejamento incremental e delegação progressiva da implementação**. Você exerce principalmente os papéis de responsável pelo produto, arquiteto e revisor: escolhe os limites, questiona propostas, pede evidências e corrige a direção. O agente assume grande parte da implementação, dos testes e da documentação.
+A metodologia combina **especificação estável, exploração assistida de decisões, planejamento incremental e delegação progressiva da implementação**. O desenvolvedor exerce principalmente os papéis de responsável pelo produto, arquiteto e revisor: escolhe os limites, questiona propostas, pede evidências e corrige a direção. O agente assume grande parte da implementação, dos testes e da documentação.
 
 O ponto mais forte é a capacidade de transformar problemas percebidos no trabalho em regras de processo: separação entre planejamento e documentação permanente, critérios de simplicidade, limpeza de materiais temporários e revisão cruzada de código, testes e requisitos. O principal ponto a melhorar é **encurtar o caminho entre uma decisão e uma demonstração real do resultado**, especialmente da experiência de instalação e uso. Há bastante rigor em contratos e persistência, mas algumas incompatibilidades de produto só aparecem depois de uma implementação extensa.
 
@@ -39,11 +39,11 @@ A apresentação é uma síntese gerada por IA, útil para orientação, mas nã
 | Dias com registros | 5 | 26–27/10 e 09–11/11, em `America/Sao_Paulo`. |
 | Soma de `duration_ms` | 16h53min aproximadamente | Tempo atribuído pelo coletor, não horas de trabalho humano nem computação ativa. |
 
-Uma única execução, P076, concentra aproximadamente **7h59min** desse tempo. Sem reconstruir pausas, esperas e atividade efetiva, seria incorreto afirmar que você trabalhou 16h53min ou que o modelo computou continuamente por esse período. Tampouco o intervalo sem registros entre outubro e novembro prova abandono ou inatividade fora das ferramentas monitoradas.
+Uma única execução, P076, concentra aproximadamente **7h59min** desse tempo. Sem reconstruir pausas, esperas e atividade efetiva, seria incorreto afirmar que houve 16h53min de trabalho humano ou que o modelo computou continuamente por esse período. Tampouco o intervalo sem registros entre outubro e novembro prova abandono ou inatividade fora das ferramentas monitoradas.
 
 Todos os 126 campos `response` do export estão vazios. Os logs locais foram importantes para recuperar o resultado das revisões e as explicações das correções. O export informa zero subagentes; isso descreve a instrumentação disponível e não demonstra que toda revisão foi intelectualmente independente.
 
-## Como você trabalha
+## Como o trabalho é conduzido
 
 O ciclo predominante é:
 
@@ -59,24 +59,24 @@ flowchart LR
 
 Há duas modalidades de interação bem distintas:
 
-1. **Exploração acompanhada.** Você solicita exemplos, alternativas e explicações antes de aceitar uma API. Isso aparece na identidade dos jobs, evolução de assinaturas, validação opcional, separação entre contratos e handlers e leitura por `JsonElement` (P009–P011 e P019–P061).
-2. **Execução delegada por resultado.** Com os contratos mais estabilizados, você solicita o refinamento a partir do código existente e entrega conjuntos inteiros de ações ao agente (P083–P107). Os commits de execução, concorrência, agendamento, gerenciamento e recuperação acompanham essa divisão funcional.
+1. **Exploração acompanhada.** O desenvolvedor solicita exemplos, alternativas e explicações antes de aceitar uma API. Isso aparece na identidade dos jobs, evolução de assinaturas, validação opcional, separação entre contratos e handlers e leitura por `JsonElement` (P009–P011 e P019–P061).
+2. **Execução delegada por resultado.** Com os contratos mais estabilizados, o desenvolvedor solicita o refinamento a partir do código existente e entrega conjuntos inteiros de ações ao agente (P083–P107). Os commits de execução, concorrência, agendamento, gerenciamento e recuperação acompanham essa divisão funcional.
 
 Essa transição faz sentido: a supervisão é maior quando a decisão define o produto e diminui quando há um contrato mais claro para implementar. A fragilidade é que a autonomia também permite consolidar interpretações não verificadas. O dashboard ilustra isso: “projeto separado” e “extensão opcional” deixaram espaço para um host executável, enquanto a experiência desejada era instalar um pacote e fazer um registro de serviços.
 
 ## Pontos fortes
 
-### 1. Você questiona decisões que realmente afetam o domínio
+### 1. Questionamento de decisões que realmente afetam o domínio
 
 As perguntas sobre mudança de assinatura entre agendamento e execução, produtor e consumidor em deployments diferentes e ausência do tipo concreto na consulta são decisões arquiteturais relevantes. Elas antecedem a implementação consolidada em `5e1bca2` e ajudam a explicar contratos estáveis, registro explícito e separação de responsabilidades.
 
-Há evidência de aprendizado ativo: você pede alternativas, examina consequências e muda de posição quando considera uma solução melhor. A reconsideração do delegate de validação em P025–P026 é um exemplo pequeno; a discussão dos contratos entre aplicações em P029–P031 é mais estrutural.
+Há evidência de aprendizado ativo: o desenvolvedor pede alternativas, examina consequências e muda de posição quando considera uma solução melhor. A reconsideração do delegate de validação em P025–P026 é um exemplo pequeno; a discussão dos contratos entre aplicações em P029–P031 é mais estrutural.
 
 **Manter:** discutir invariantes e experiência pública da biblioteca com esse nível de atenção. Esses são pontos nos quais uma decisão humana bem fundamentada evita trabalho posterior.
 
 ### 2. O planejamento é incremental e considera o estado real
 
-Você pede que o refinamento considere o código já entregue, em vez de executar um plano inicial como se ele permanecesse completo e correto. P012, P015–P017 e a sequência de refinamentos de P083 em diante mostram essa intenção.
+O desenvolvedor pede que o refinamento considere o código já entregue, em vez de executar um plano inicial como se ele permanecesse completo e correto. P012, P015–P017 e a sequência de refinamentos de P083 em diante mostram essa intenção.
 
 O Git oferece evidência correspondente: execução, concorrência, scheduler, gerenciamento, recuperação e reconciliação aparecem em commits distintos. Isso facilita compreender dependências e revisar mudanças de comportamento.
 
@@ -90,11 +90,11 @@ O commit `5e1bca2` contém conversores de strings e `JsonNode`, além de `Unicod
 
 **Manter:** exigir reprodução, comportamento esperado, comportamento observado e teste de regressão para cada achado. A instrução de confrontar código, docs e spec é uma das práticas mais eficazes deste histórico.
 
-### 4. Você corrige o processo quando percebe desperdício
+### 4. Correção do processo ao identificar desperdício
 
 P081–P089 questionam relatórios permanentes, scripts auxiliares e referências a tarefas concluídas. P124–P126 tratam a documentação como informação organizada por responsabilidade. O resultado está visível em `8a603b0`, nas regras do repositório e em `cb4347f`.
 
-O aspecto positivo não é apenas limpar arquivos: você identifica o mecanismo que os produz e pede uma regra para evitar repetição. Isso é uma habilidade importante ao trabalhar com agentes que tendem a gerar documentação e scaffolding além da necessidade imediata.
+O aspecto positivo não é apenas limpar arquivos: o desenvolvedor identifica o mecanismo que os produz e pede uma regra para evitar repetição. Isso é uma habilidade importante ao trabalhar com agentes que tendem a gerar documentação e scaffolding além da necessidade imediata.
 
 ### 5. Existe preocupação com correção além do caminho feliz
 
@@ -130,7 +130,7 @@ Esses volumes não provam qualidade por si, mas a variedade dos cenários é com
 
 ### 4. Tornar o limite do escopo público mais explícito
 
-**Evidência:** você investiu bastante na preservação de Unicode, compatibilidade de contratos e composição entre aplicações. O dashboard foi solicitado explicitamente em P110 e é uma extensão além da interface gráfica excluída do escopo obrigatório da spec.
+**Evidência:** houve investimento significativo na preservação de Unicode, compatibilidade de contratos e composição entre aplicações. O dashboard foi solicitado explicitamente em P110 e é uma extensão além da interface gráfica excluída do escopo obrigatório da spec.
 
 **Avaliação:** extensão autorizada e rigor técnico não são automaticamente excesso. O risco é ampliar garantias públicas sem avaliar quanto código, testes e manutenção elas passam a exigir. Não há dados para afirmar que o investimento em serialização foi desnecessário.
 
@@ -148,7 +148,7 @@ Esses volumes não provam qualidade por si, mas a variedade dos cenários é com
 
 **Evidência:** o histórico mostra perguntas relevantes e correções críticas, mas não registra minutos de leitura, revisão manual ou capacidade de reproduzir o raciocínio sem ajuda. O tempo do coletor contém um registro de quase oito horas.
 
-**Ação:** registrar por incremento três medidas simples: tempo humano aproximado, intervenções que mudaram a solução e uma breve explicação escrita por você sobre uma decisão ou falha. Para testar aprendizado, explicar e alterar um comportamento pequeno sem pedir inicialmente a solução ao agente. Para testar produtividade, comparar tarefas semelhantes com critérios de aceite equivalentes.
+**Ação:** registrar por incremento três medidas simples: tempo humano aproximado, intervenções que mudaram a solução e uma breve explicação escrita pelo desenvolvedor sobre uma decisão ou falha. Para testar aprendizado, explicar e alterar um comportamento pequeno sem pedir inicialmente a solução ao agente. Para testar produtividade, comparar tarefas semelhantes com critérios de aceite equivalentes.
 
 ## Distribuição do investimento
 
@@ -166,13 +166,13 @@ Agrupamento analítico dos registros, por assunto e ordem no export. Os custos d
 
 O dashboard ocupa sete registros, mas aproximadamente 24,7% dos tokens. Isso ilustra por que contar mensagens não mede esforço delegado. P111, sua execução inicial, equivale a US$ 2,4671 base; P116, execução da reformulação do consumo, a US$ 2,3442. Não seria correto classificar todo o segundo valor como desperdício: ele também implementa e verifica uma definição mais específica de produto.
 
-O custo de tokens é baixo em termos absolutos nesta tabela, mas isso não mede o custo da sua atenção. O maior ganho provável de melhorar o fluxo está em reduzir revisões de propostas repetidas e incompatibilidades descobertas tarde. O histórico não permite quantificar esse ganho.
+O custo de tokens é baixo em termos absolutos nesta tabela, mas isso não mede o custo da atenção humana. O maior ganho provável de melhorar o fluxo está em reduzir revisões de propostas repetidas e incompatibilidades descobertas tarde. O histórico não permite quantificar esse ganho.
 
 ## Custo em dólares e memória de cálculo
 
 ### Tarifas e premissas
 
-Preços públicos consultados em **11/11/2026**, por milhão de tokens, em API Standard. São uma referência atual aplicada ao consumo observado, não uma reconstrução de preços históricos da sua conta.
+Preços públicos consultados em **11/11/2026**, por milhão de tokens, em API Standard. São uma referência atual aplicada ao consumo observado, não uma reconstrução de preços históricos da conta.
 
 | Modelo | Entrada sem cache | Leitura de cache | Escrita de cache de 30 min | Escrita de cache de 12 h | Saída |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -284,9 +284,9 @@ O adicional de contexto longo exige os logs por chamada: não pode ser deduzido 
 
 Um pedido de execução mais preciso, adaptável a cada incremento:
 
-> Implemente este comportamento a partir da spec e do código atual. Antes de ampliar a solução, demonstre o caminho mínimo de consumo em uma aplicação externa. Pode decidir detalhes internos reversíveis. Consulte-me se precisar mudar contrato público, persistência, dependências ou escopo. Valide os riscos relevantes e, ao encontrar um defeito, investigue os demais caminhos que compartilham sua causa. Ao concluir, apresente o resultado observável, as verificações executadas e as limitações. Consolide apenas informação durável na documentação responsável.
+> Implemente este comportamento a partir da spec e do código atual. Antes de ampliar a solução, demonstre o caminho mínimo de consumo em uma aplicação externa. Pode decidir detalhes internos reversíveis. Consulte o responsável pelo projeto se precisar mudar contrato público, persistência, dependências ou escopo. Valide os riscos relevantes e, ao encontrar um defeito, investigue os demais caminhos que compartilham sua causa. Ao concluir, apresente o resultado observável, as verificações executadas e as limitações. Consolide apenas informação durável na documentação responsável.
 
-Para o objetivo de praticar IA, preserve também sessões deliberadas de exploração: escolha uma decisão de alto impacto, formule sua própria hipótese e use o agente para confrontá-la com exemplos e contraexemplos. O material sugere que você já faz bem a parte de questionar; o próximo avanço é medir o que aprendeu e antecipar a demonstração do produto que espera receber.
+Para o objetivo de praticar IA, recomenda-se preservar também sessões deliberadas de exploração: escolher uma decisão de alto impacto, formular uma hipótese própria e usar o agente para confrontá-la com exemplos e contraexemplos. O material evidencia questionamento crítico; o próximo avanço é medir o aprendizado e antecipar a demonstração do produto esperado.
 
 ## Rastreabilidade do histórico completo
 
