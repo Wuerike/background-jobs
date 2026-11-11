@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/BackgroundJobs/BackgroundJobs.csproj" />
+    <ProjectReference Include="../../src/BackgroundJobs.Dashboard/BackgroundJobs.Dashboard.csproj" />
     <ProjectReference Include="../../src/BackgroundJobs.Demo/BackgroundJobs.Demo.csproj" />
   </ItemGroup>
 

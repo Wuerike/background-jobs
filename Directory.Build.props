@@ -1,5 +1,9 @@
 <Project>
   <PropertyGroup>
-    <ArtifactsPath>$(MSBuildThisFileDirectory)build</ArtifactsPath>
+    <BackgroundJobsBuildPlatform Condition="'$(OS)' == 'Windows_NT'">windows</BackgroundJobsBuildPlatform>
+    <BackgroundJobsBuildPlatform Condition="'$(BackgroundJobsBuildPlatform)' == ''">unix</BackgroundJobsBuildPlatform>
+    <ArtifactsPath Condition="'$(ArtifactsPath)' == ''">$(MSBuildThisFileDirectory)build/$(BackgroundJobsBuildPlatform)</ArtifactsPath>
+    <BackgroundJobsPackageFeed Condition="'$(BackgroundJobsPackageFeed)' == ''">$(ArtifactsPath)/packages</BackgroundJobsPackageFeed>
+    <RestoreAdditionalProjectSources Condition="Exists('$(BackgroundJobsPackageFeed)')">$(RestoreAdditionalProjectSources);$(BackgroundJobsPackageFeed)</RestoreAdditionalProjectSources>
   </PropertyGroup>
 </Project>

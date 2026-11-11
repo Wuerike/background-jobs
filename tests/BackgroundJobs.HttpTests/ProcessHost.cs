@@ -75,11 +75,9 @@ internal sealed class ProcessHost : IAsyncDisposable
 
     public async Task StartDemo(int workers = 1)
     {
-        var repo = new DirectoryInfo(AppContext.BaseDirectory);
-        while (repo is not null && !File.Exists(Path.Combine(repo.FullName, "BackgroundJobs.slnx"))) repo = repo.Parent;
-        if (repo is null) throw new InvalidOperationException("Cannot locate repository build layout.");
-        var configuration = new DirectoryInfo(AppContext.BaseDirectory).Name;
-        var dll = Path.Combine(repo.FullName, "build", "bin", "BackgroundJobs.Demo", configuration, "BackgroundJobs.Demo.dll");
+        var output = new DirectoryInfo(AppContext.BaseDirectory);
+        var configuration = output.Name;
+        var dll = Path.Combine(output.Parent!.Parent!.FullName, "BackgroundJobs.Demo", configuration, "BackgroundJobs.Demo.dll");
         if (!File.Exists(dll)) throw new FileNotFoundException("Build the demo before process tests.", dll);
         var port = FreePort();
         Demo = Launch(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet", [dll], new()

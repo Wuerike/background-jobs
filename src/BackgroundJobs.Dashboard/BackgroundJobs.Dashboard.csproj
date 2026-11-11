@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Description>Optional Blazor Server monitoring and management for BackgroundJobs.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.App.Internal.Assets" Version="10.0.14" />
+    <ProjectReference Include="../BackgroundJobs/BackgroundJobs.csproj" />
+  </ItemGroup>
+</Project>

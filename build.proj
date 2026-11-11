@@ -1,0 +1,23 @@
+<Project DefaultTargets="Build">
+  <Import Project="Directory.Build.props" />
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+    <BackgroundJobsPackageVersion>1.0.0-dev.$([System.DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff'))</BackgroundJobsPackageVersion>
+    <PublishDir Condition="'$(PublishDir)' == ''">$(ArtifactsPath)/publish/demo</PublishDir>
+  </PropertyGroup>
+  <Target Name="Package">
+    <MakeDir Directories="$(ArtifactsPath);$(BackgroundJobsPackageFeed)" />
+    <Exec Command="dotnet pack &quot;$(MSBuildThisFileDirectory)src/BackgroundJobs/BackgroundJobs.csproj&quot; -c $(Configuration) --artifacts-path &quot;$(ArtifactsPath)&quot; -o &quot;$(BackgroundJobsPackageFeed)&quot; -p:PackageVersion=$(BackgroundJobsPackageVersion) --nologo" />
+    <Exec Command="dotnet pack &quot;$(MSBuildThisFileDirectory)src/BackgroundJobs.Dashboard/BackgroundJobs.Dashboard.csproj&quot; -c $(Configuration) --artifacts-path &quot;$(ArtifactsPath)&quot; -o &quot;$(BackgroundJobsPackageFeed)&quot; -p:PackageVersion=$(BackgroundJobsPackageVersion) --nologo" />
+    <WriteLinesToFile File="$(ArtifactsPath)/BackgroundJobs.Packages.props" Lines="&lt;Project&gt;&lt;PropertyGroup&gt;&lt;BackgroundJobsPackageVersion&gt;$(BackgroundJobsPackageVersion)&lt;/BackgroundJobsPackageVersion&gt;&lt;/PropertyGroup&gt;&lt;/Project&gt;" Overwrite="true" />
+  </Target>
+  <Target Name="Build" DependsOnTargets="Package">
+    <Exec Command="dotnet build &quot;$(MSBuildThisFileDirectory)BackgroundJobs.slnx&quot; -c $(Configuration) --artifacts-path &quot;$(ArtifactsPath)&quot; --nologo" />
+  </Target>
+  <Target Name="Test" DependsOnTargets="Build">
+    <Exec Command="dotnet test &quot;$(MSBuildThisFileDirectory)BackgroundJobs.slnx&quot; -c $(Configuration) --artifacts-path &quot;$(ArtifactsPath)&quot; --no-build" />
+  </Target>
+  <Target Name="PublishDemo" DependsOnTargets="Build">
+    <Exec Command="dotnet publish &quot;$(MSBuildThisFileDirectory)src/BackgroundJobs.Demo&quot; -c $(Configuration) --artifacts-path &quot;$(ArtifactsPath)&quot; --no-build -o &quot;$(PublishDir)&quot; --nologo" />
+  </Target>
+</Project>

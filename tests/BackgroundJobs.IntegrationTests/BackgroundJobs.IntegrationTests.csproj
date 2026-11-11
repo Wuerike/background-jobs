@@ -10,6 +10,7 @@
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
     <ProjectReference Include="../../src/BackgroundJobs/BackgroundJobs.csproj" />
+    <ProjectReference Include="../../src/BackgroundJobs.Dashboard/BackgroundJobs.Dashboard.csproj" />
     <Using Include="Xunit" />
   </ItemGroup>
 </Project>

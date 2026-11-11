@@ -6,8 +6,17 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <Import Project="$(ArtifactsPath)/BackgroundJobs.Packages.props" Condition="Exists('$(ArtifactsPath)/BackgroundJobs.Packages.props')" />
+  <PropertyGroup>
+    <BackgroundJobsPackageVersion Condition="'$(BackgroundJobsPackageVersion)' == ''">1.0.0</BackgroundJobsPackageVersion>
+  </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../BackgroundJobs/BackgroundJobs.csproj" />
+    <PackageReference Include="BackgroundJobs" Version="$(BackgroundJobsPackageVersion)" />
+    <PackageReference Include="BackgroundJobs.Dashboard" Version="$(BackgroundJobsPackageVersion)" />
   </ItemGroup>
 
+  <Target Name="EnsureLocalPackages" BeforeTargets="CollectPackageReferences;PrepareForBuild"
+          Condition="!Exists('$(ArtifactsPath)/BackgroundJobs.Packages.props')">
+    <Error Text="Build the local packages first: dotnet msbuild build.proj -t:Build." />
+  </Target>
 </Project>

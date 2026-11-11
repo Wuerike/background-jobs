@@ -51,6 +51,36 @@ internal static class JobCodec
         return new JobSummary(id, (string)fields[1]!, State((string)fields[2]!), Number((string)fields[3]!, 0, 10));
     }
 
+    internal static JobMonitorItem ReadMonitorItem(string id, RedisResult[] row)
+    {
+        try
+        {
+            var fields = ((RedisResult[])row[0]!).Select(value => (string?)value).ToArray();
+            if (fields.Length != 9 || fields.Take(8).Any(value => value is null) ||
+                fields[0] != id || string.IsNullOrWhiteSpace(fields[1])) throw new InvalidDataException();
+            var state = State(fields[2]!);
+            var max = Number(fields[4]!, 1, 10);
+            var attempts = Number(fields[3]!, 0, max);
+            var created = Date(fields[6]!);
+            var updated = Date(fields[7]!);
+            DateTimeOffset? due = fields[8] is { } date ? Date(date) : null;
+            var change = ReadChange((string)row[2]!);
+            var last = row[1].IsNull ? null : ReadAttempt((string)row[1]!);
+            if (created > updated || (state == JobState.Scheduled) != due.HasValue ||
+                change.State != state || change.At != updated ||
+                attempts > 0 && (last is null || last.Attempt != attempts) ||
+                state == JobState.Processing && (last is null || last.FinishedAt is not null || last.StartedAt != updated) ||
+                state != JobState.Processing && last is { FinishedAt: null } ||
+                last?.FinishedAt < last?.StartedAt) throw new InvalidDataException();
+            return new(id, fields[1]!, state, attempts, max, Number(fields[5]!, 0, 60000), created, updated, due, last);
+        }
+        catch (Exception error) when (error is InvalidDataException or JsonException or InvalidOperationException or
+            ArgumentException or NullReferenceException or IndexOutOfRangeException)
+        {
+            throw new InvalidDataException($"Invalid monitoring projection for job '{id}'.");
+        }
+    }
+
     internal static long Cycle(string value)
     {
         if (!long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var cycle) || cycle < 0 ||

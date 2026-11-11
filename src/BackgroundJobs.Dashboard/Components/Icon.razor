@@ -1,0 +1,19 @@
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    @switch (Name)
+    {
+        case "overview": <path d="M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z" /> break;
+        case "jobs": <path d="M4 5h16v4H4z M4 12h16 M4 17h16 M4 21h10" /> break;
+        case "refresh": <path d="M20 7v5h-5 M4 17v-5h5 M6 6a8 8 0 0 1 14 6 M18 18A8 8 0 0 1 4 12" /> break;
+        case "search": <circle cx="10" cy="10" r="6" /><path d="m15 15 6 6" /> break;
+        case "processing": <path d="m10 5 9 7-9 7z" /> break;
+        case "succeeded": <circle cx="12" cy="12" r="9" /><path d="m8 12 3 3 5-6" /> break;
+        case "failed": <path d="M12 3 2 21h20z M12 9v5 M12 18h.01" /> break;
+        case "deleted": <path d="M4 6h16 M9 6V3h6v3 M6 6l1 15h10l1-15 M10 10v7 M14 10v7" /> break;
+        case "enqueued": <path d="M4 5h16 M4 12h16 M4 19h16" /><circle cx="7" cy="5" r="1" /><circle cx="7" cy="12" r="1" /> break;
+        case "scheduled": <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /> break;
+        case "copy": <rect x="8" y="8" width="12" height="13" rx="2" /><path d="M15 8V3H3v13h5" /> break;
+        case "back": <path d="m10 5-7 7 7 7 M3 12h18" /> break;
+        default: <path d="M4 17 10 3l-1 9h11l-7 9 1-9" /> break;
+    }
+</svg>
+@code { [Parameter] public string Name { get; set; } = "brand"; }

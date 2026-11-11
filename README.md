@@ -2,9 +2,11 @@
 
 Biblioteca em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 
-- `BackgroundJobs.slnx`: solução com biblioteca, demo e três suítes de testes.
+- `BackgroundJobs.slnx`: solução com biblioteca, demo, dashboard opcional e três suítes de testes.
 - `src/BackgroundJobs`: registro tipado, criação, consulta e gerenciamento, agendamento, retries e execução com workers configuráveis, persistência de tentativas e ciclo do servidor.
-- `src/BackgroundJobs.Demo`: aplicação ASP.NET Core com os três jobs da spec, criação, listagem, detalhe, deleção, reenfileiramento, eventos e health.
+- `src/BackgroundJobs.Demo`: consumidor dos pacotes NuGet, com os três jobs da spec, API, executor e dashboard integrado.
+- `build.proj`: empacotamento local das bibliotecas e build/teste/publicação da aplicação consumidora.
+- `src/BackgroundJobs.Dashboard`: extensão opcional Blazor Server para monitoramento e ações operacionais.
 - `tests/BackgroundJobs.UnitTests`: registro, preparação, modelos e orquestração, sem Redis.
 - `tests/BackgroundJobs.IntegrationTests`: criação atômica, consulta consistente, índices e concorrência com Redis real.
 - `tests/BackgroundJobs.HttpTests`: contratos HTTP, validação de entrada e integração com Redis real.
@@ -12,6 +14,63 @@ Biblioteca em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 A biblioteca cria, consulta, agenda e executa jobs com quantidade configurável de workers, padrão 4. Falhas com orçamento restante voltam à fila após o atraso fixo contado do fim da tentativa; sucesso ou esgotamento encerram o job. Estados, histórico e tentativas são persistentes. Listagem, deleção lógica de pendentes e reenfileiramento manual de finalizados estão disponíveis pela biblioteca e HTTP. Antes da prontidão, a recuperação fecha tentativas abertas como `interrupted`: reenfileira imediatamente quando resta orçamento ou finaliza em `failed` quando o limite foi atingido. A tentativa interrompida conta no limite; funções podem repetir efeitos externos após uma queda (at-least-once sujeito ao orçamento).
 
 Para reproduzir em Bash/Linux/WSL: [prepare o SDK](#sdk-no-wsl), [inicie o Redis](#redis-local), [compile e inicie a demo](#compilar-e-executar), [exercite o HTTP](#demonstrar-execução-http), [execute os testes](#validar) e [reinicie com os mesmos dados](#parar-e-reiniciar-com-os-mesmos-dados).
+
+## Dashboard opcional
+
+`BackgroundJobs.Dashboard` é um pacote opcional para aplicações ASP.NET Core .NET 10 que já usam a biblioteca. Ele disponibiliza `/dashboard/` na mesma aplicação com um registro:
+
+```csharp
+using BackgroundJobs.Dashboard;
+
+builder.Services.AddBackgroundJobsDashboard();
+```
+
+A aplicação instala o pacote NuGet e mantém sua configuração normal de jobs. O dashboard reutiliza o `IConnectionMultiplexer` registrado no contêiner e o prefixo padrão `background-jobs`; não registra workers, handlers, scheduler ou recuperação. Componentes, CSS, JavaScript, runtime Blazor, rotas e middleware são responsabilidade do pacote. Não é necessário adicionar páginas Razor, editar propriedades do projeto ou chamar métodos de mapeamento na aplicação.
+
+A Demo consome `BackgroundJobs` e `BackgroundJobs.Dashboard` por `PackageReference` e contém esse único registro adicional. Após compilar com o fluxo de pacotes locais descrito abaixo, inicie-a e abra `http://127.0.0.1:8080/dashboard/`:
+
+```bash
+REDIS_CONNECTION=127.0.0.1:6379 \
+  dotnet run --project src/BackgroundJobs.Demo --no-build --no-launch-profile
+```
+
+O painel inclui indicadores dos seis estados, fila, execução, agendamentos/retries, busca por ID/nome, período UTC, ordenação e paginação. Detalhes mostram argumentos JSON copiáveis, opções, tempos, erros, tentativas por ciclo e histórico. Ações de reenfileiramento e deleção têm confirmação e usam as decisões atômicas da biblioteca.
+
+Configuração opcional permanece na mesma chamada:
+
+```csharp
+builder.Services.AddBackgroundJobsDashboard(
+    prefix: "minha-aplicacao", // mesmo prefixo do cliente, gerente e executor
+    configure: options =>
+    {
+        options.Path = "/operations/jobs";
+        options.StorageLabel = "Minha aplicação"; // rótulo público, sem credenciais
+        options.MaxJobs = 10_000;
+        // options.AuthorizationPolicy = "JobOperators"; // política definida pelo consumidor
+    });
+```
+
+A rota é isolada das rotas da aplicação. A biblioteca principal continua utilizável sem ASP.NET Core ou dashboard. Autenticação e políticas pertencem à aplicação consumidora; o pacote não cria usuários nem um mecanismo próprio de login. Parâmetros e erros podem conter informações da aplicação, portanto suas políticas devem abranger leitura e ações.
+
+### Pacotes locais e build
+
+Os pacotes não estão publicados em um feed externo. O ponto de entrada recorrente do repositório empacota as duas bibliotecas, registra a versão local usada pela Demo e compila a solução:
+
+```bash
+dotnet msbuild build.proj -t:Build
+```
+
+Os artefatos ficam em `build/unix` no Linux/WSL e `build/windows` no Windows, com os `.nupkg` na subpasta `packages`. A separação evita colisões de restore e compilação entre as plataformas no mesmo checkout. A versão de desenvolvimento é única por empacotamento para evitar reutilização de uma cópia antiga no cache NuGet. `BackgroundJobs.Packages.props` informa a versão exata à Demo; esse arquivo e os pacotes são gerados e ignorados pelo Git. Ao alterar as bibliotecas, use esse build para atualizar os pacotes consumidos pela Demo.
+
+`-t:Test` compila e executa as suítes; `-t:PublishDemo -p:Configuration=Release` publica a Demo em `build/unix/publish/demo` ou `build/windows/publish/demo`. `-p:ArtifactsPath=/tmp/backgroundjobs-build` permite um diretório de artefatos próprio para Linux/WSL. Use o mesmo caminho em comandos posteriores de `dotnet run` e `dotnet test`.
+
+Para distribuir uma versão estável, os projetos continuam empacotáveis com `dotnet pack src/BackgroundJobs` e `dotnet pack src/BackgroundJobs.Dashboard`; o pacote da interface depende do pacote do núcleo e inclui seus recursos e requisitos de build. Para instalar em outro projeto, configure a subpasta `packages` gerada como source NuGet adicional, mantendo `nuget.org` habilitado para as dependências. Então use `dotnet add package BackgroundJobs.Dashboard --prerelease` com o feed local configurado. O consumidor recebe o núcleo por dependência, sem referência a projetos ou arquivos deste checkout; a opção `--prerelease` seleciona as versões locais de desenvolvimento.
+
+A atualização começa em 10 segundos e pode ser pausada ou ajustada para 5/10/30/60 segundos. Há cache compartilhado de até 5 segundos por host; o botão manual solicita nova leitura. Falhas mantêm os últimos dados marcados como desatualizados. O relógio de duração pode avançar sem uma nova confirmação de estado. Horários são exibidos em UTC; conexão ao Redis não indica prontidão do executor.
+
+As consultas leem apenas metadados e últimas entradas, sem buscar parâmetros ou históricos completos de cada linha. O limite padrão é 10.000 jobs, configurável em `MaxJobs` entre 1 e 100.000. Acima dele a leitura falha explicitamente, sem totais parciais. A estratégia tem custo O(N), adequada a volumes moderados. A observação informa início e fim; há consistência por job, sem snapshot global, e as páginas podem mudar entre atualizações. Os indicadores contam todos os jobs observados, independentemente dos filtros. O intervalo de criação inclui o início e exclui o fim.
+
+“Retry automático” identifica `scheduled` com tentativas consumidas; reenfileirar manualmente só se aplica aos estados finais e reinicia o contador. Os ciclos preservam todos os erros e tentativas. O tempo do ciclo atual inclui agendamento, fila, retries e execução, desde a criação ou o último reenfileiramento até a conclusão ou o instante local em andamento. Duração interrompida é o intervalo até a recuperação; o acumulado concluído exclui interrupções. A tabela identifica a última execução, mesmo quando pertence a um ciclo anterior. Não há cancelamento em execução, edição de parâmetros, logs de aplicação, heartbeat ou estimativa de término.
 
 ## Registro de contratos
 
@@ -243,24 +302,35 @@ instalados, use `dotnet --list-sdks`.
 
 ## Compilar e executar
 
+Para desenvolver com recompilação automática, com GNU Make, SDK .NET 10 e Docker Compose disponível:
+
 ```bash
-dotnet restore BackgroundJobs.slnx
-dotnet build BackgroundJobs.slnx --no-restore
-dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
+make run
+```
+
+O comando cria o diretório de dados, inicia o Redis local pelo Compose e aguarda sua prontidão, gera os pacotes locais das bibliotecas e inicia a demo com `dotnet watch`. Usa `docker.exe` quando disponível no WSL e `docker` nos demais ambientes; `DOCKER` permite escolher o executável. O Redis permanece disponível após encerrar o watch; use o mesmo executável Docker com `compose down` para pará-lo preservando os dados.
+
+Alterações na demo são acompanhadas automaticamente. Ao alterar as bibliotecas, pare o watch e execute `make run` novamente para atualizar os pacotes. Para outras portas locais, use `PORT=8081 REDIS_PORT=6380 make run`. Para um Redis externo já disponível, informe `REDIS_CONNECTION`; quando diferente da conexão local configurada, o comando não inicia o Compose.
+
+Para compilar a solução e executar sem watch:
+
+```bash
+dotnet msbuild build.proj -t:Build
+dotnet run --project src/BackgroundJobs.Demo --no-build --no-launch-profile
 ```
 
 A demo escuta na porta definida por `PORT` (padrão `8080`) e usa `REDIS_CONNECTION` (padrão `127.0.0.1:6379`). Para uma porta alternativa do Redis e da demo:
 
 ```bash
-PORT=8081 REDIS_CONNECTION=127.0.0.1:6380 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
+PORT=8081 REDIS_CONNECTION=127.0.0.1:6380 dotnet run --project src/BackgroundJobs.Demo --no-build --no-launch-profile
 ```
 
 A demo usa `WORKER_COUNT`, com padrão **4**. Um valor fornecido precisa ser inteiro positivo de 32 bits; vazio, formato inválido, zero, negativo ou overflow impedem a inicialização com mensagem que identifica a configuração. Para FIFO, inicie com um worker; para observar concorrência, use dois:
 
 ```bash
-WORKER_COUNT=1 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
+WORKER_COUNT=1 dotnet run --project src/BackgroundJobs.Demo --no-build --no-launch-profile
 # Após parar a aplicação, iniciar com dois workers:
-WORKER_COUNT=2 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
+WORKER_COUNT=2 dotnet run --project src/BackgroundJobs.Demo --no-build --no-launch-profile
 ```
 
 Use apenas um executor por armazenamento. `DATA_DIR` configura o diretório do Redis no Compose; `REDIS_CONNECTION` aponta a biblioteca e a demo para esse serviço.
@@ -279,8 +349,8 @@ Para uso interativo com `dotnet run`, pressione Ctrl+C e aguarde o término das 
 
 ```bash
 export PORT=8080 WORKER_COUNT=4 REDIS_CONNECTION=127.0.0.1:6379
-dotnet build BackgroundJobs.slnx --no-restore
-dotnet build/bin/BackgroundJobs.Demo/debug/BackgroundJobs.Demo.dll > /tmp/background-jobs-demo.log 2>&1 &
+dotnet msbuild build.proj -t:Build
+dotnet build/unix/bin/BackgroundJobs.Demo/debug/BackgroundJobs.Demo.dll > /tmp/background-jobs-demo.log 2>&1 &
 demo_pid=$!
 curl --retry 15 --retry-delay 1 --retry-connrefused --fail-with-body -sS "http://localhost:$PORT/health"
 # Após criar/consultar jobs em outro terminal, pare e aguarde:
@@ -290,7 +360,7 @@ wait "$demo_pid"
 docker compose down
 docker compose up -d --wait redis
 # Reinicie o executor no mesmo armazenamento:
-dotnet build/bin/BackgroundJobs.Demo/debug/BackgroundJobs.Demo.dll > /tmp/background-jobs-demo.log 2>&1 &
+dotnet build/unix/bin/BackgroundJobs.Demo/debug/BackgroundJobs.Demo.dll > /tmp/background-jobs-demo.log 2>&1 &
 demo_pid=$!
 ```
 
@@ -406,9 +476,15 @@ O executável de referência desta validação é Redis 7.0.15 dos pacotes Ubunt
 A suíte completa requer Linux/WSL, Redis acessível por `REDIS_CONNECTION` e um executável `redis-server` para os testes de processos dedicados. Configure `REDIS_SERVER_EXECUTABLE` quando esse executável estiver fora do PATH. A seção de testes de processos abaixo descreve o comando separado e a opção de executar os contratos HTTP em outras plataformas.
 
 ```bash
-dotnet restore BackgroundJobs.slnx
-dotnet build BackgroundJobs.slnx
+dotnet msbuild build.proj -t:Build
 dotnet test BackgroundJobs.slnx --no-build
+```
+
+Para compilar no WSL enquanto ferramentas Windows restauram o mesmo checkout, use uma pasta de artefatos própria e reutilize a opção nos comandos:
+
+```bash
+dotnet msbuild build.proj -t:Build -p:ArtifactsPath=/tmp/backgroundjobs-build
+dotnet test BackgroundJobs.slnx --artifacts-path /tmp/backgroundjobs-build --no-build
 ```
 
 As suítes de integração e HTTP exigem Redis real disponível; inicie-o com `docker compose up -d --wait redis`. A integração falha explicitamente se não conseguir conectar, sem ignorar testes.
@@ -428,13 +504,19 @@ A cobertura está nos [testes unitários](tests/BackgroundJobs.UnitTests), nos [
 
 Os testes HTTP de criação/consulta isolam o motor na composição de teste. Os testes de execução usam o motor ativo; os de configuração preservam a criação real do `JobServer` pelo `Program`, isolando configuração por host e chaves pela conexão de teste. Todos param o servidor antes da limpeza. Não há flag de produto para desativar o motor.
 
-A verificação por suíte aprova **737 testes** (220 unitários, 357 de integração e 160 HTTP, incluindo 11 de processos), sem falhas ou ignorados. Restore e build aprovam com SDK 10.0.114; o build não apresenta avisos nem erros (13,42 s). O ambiente é Ubuntu 24.04.2 em Linux/WSL: integração e HTTP usam Redis **8.2.10** do Compose na porta 16389, enquanto os processos dedicados usam o executável nativo Redis **7.0.15** dos pacotes oficiais Ubuntu, com portas próprias. Ambos usam AOF, `appendfsync always` e `noeviction`.
+A verificação por suíte aprova **769 testes** (226 unitários, 374 de integração e 169 HTTP, incluindo 11 de processos), sem falhas ou ignorados. Restore e build aprovam com SDK 10.0.114; o build não apresenta avisos nem erros. O ambiente é Ubuntu 24.04 em Linux/WSL, com Redis **7.0.15** dos pacotes oficiais Ubuntu: armazenamento dedicado com AOF na porta 16389 e processos isolados com portas próprias. As validações de Docker e as medições demonstrativas identificadas abaixo usam Redis **8.2.10**.
 
 | Suíte | Aprovados | Duração reportada pelo runner |
 | --- | ---: | --- |
-| Unitários | 220 | 1 s |
-| Integração | 357 | 1 min 2 s |
-| HTTP, incluindo processos | 160 | 2 min 6 s |
+| Unitários | 226 | 594 ms |
+| Integração | 374 | 43 s |
+| HTTP, incluindo processos e recursos estáticos | 169 | 1 min 53 s |
+
+A entrega de CSS, módulos da interface e runtime Blazor é verificada em `Development` e `Production`, exigindo conteúdo e MIME type corretos. O monitoramento tem regressões em `MonitoringTests` e `DashboardHttpTests`: projeções e dados inválidos, seis estados, retry, paginação, filtros, ciclos com timestamps iguais, ausência de executor/catálogo, autorização, texto escapado e assets Blazor. A consulta de 1.000 jobs, compartilhada por três chamadas concorrentes, atende ao orçamento local de 2 segundos; alterações de estado preservam consistência por job. O registro da extensão preserva o gerente da aplicação e usa seu próprio prefixo configurado.
+
+A interface integrada à Demo consumidora foi exercitada em Chromium via Playwright, em desktop e celular, com Redis real e os seis estados, incluindo retry e ciclos de reenfileiramento. Foram conferidos assets, circuito Blazor, links e filtros preservados, tentativas por ciclo e menu móvel sem transbordamento. A Demo publicada cria, executa e consulta jobs pela API e mostra os mesmos dados em `/dashboard/`. Uma aplicação externa publicada instala apenas o NuGet, registra `AddBackgroundJobsDashboard()` e mantém sua API própria, sem páginas Razor, propriedades extras ou mapeamentos de UI. O consumidor exclusivo do núcleo executa sem ASP.NET Core ou dashboard.
+
+As regressões de integração do pacote verificam também a rota personalizada, a preservação de outras rotas e o login/política fallback do consumidor. A UI conserva tratamento de ausência, conflito, resultado incerto, conteúdo escapado, pausa e indisponibilidade; as ações continuam usando as operações atômicas da biblioteca. A auditoria axe-core das telas verificadas de visão geral, agenda e detalhes de falha, ciclos e interrupção não aponta violações.
 
 Os contratos HTTP incluem a aceitação dos limites `delayMs=0/60000` e `failTimes=0/10` com persistência antes do `202`, sem executar o handler no teste de fronteira. O consumidor console copiado literalmente desta página também compila e executa fora do checkout, com referência apenas à biblioteca e sem HTTP, confirmando ID, argumentos, contexto e histórico por consulta pública. Os recursos Lua são carregados do assembly sem copiar `src/`.
 

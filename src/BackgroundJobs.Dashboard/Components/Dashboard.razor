@@ -1,0 +1,100 @@
+@implements IAsyncDisposable
+@inject DashboardObservationCache Cache
+@inject RedisJobManager Manager
+@inject DashboardOptions Options
+@inject DashboardConnection Connection
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+@inject Microsoft.AspNetCore.Authorization.IAuthorizationService Authorization
+@inject AuthenticationStateProvider Authentication
+@inject Microsoft.Extensions.Logging.ILogger<Dashboard> Logger
+@using Microsoft.AspNetCore.WebUtilities
+@using System.Globalization
+@using System.Text.Json
+
+<PageTitle>BackgroundJobs · Monitoramento</PageTitle>
+<div class="dashboard">
+<a class="skip" href="#main-content">Ir para o conteúdo</a>
+<aside class="sidebar">
+    <a class="brand" href="@ListUrl()"><span class="brand-symbol"><Icon /></span><span>Background<span class="brand-light">Jobs</span><small>PAINEL DE OPERAÇÕES</small></span></a>
+    <button class="mobile-menu" @onclick="() => menuOpen = !menuOpen" aria-expanded="@menuOpen">☰ Menu</button>
+    <nav class="@(menuOpen ? "open" : "")" aria-label="Navegação principal">
+        <span class="nav-label">WORKSPACE</span>
+        <a class="@(stateFilter is null && selectedId is null ? "active" : "")" href="@ListUrl()"><Icon Name="overview" />Visão geral</a>
+        <a href="@ListUrl()"><Icon Name="jobs" />Todos os jobs<span class="nav-count">@(observation?.Items.Count.ToString() ?? "—")</span></a>
+        <span class="nav-label">MONITORAMENTO</span>
+        @foreach (var state in States)
+        {
+            <a class="@(stateFilter == state ? "active" : "")" href="@StateUrl(state)"><Icon Name="@Presentation.Key(state)" />@Presentation.State(state)<span class="nav-count">@(observation?.Counts[state].ToString() ?? "—")</span></a>
+        }
+    </nav>
+    <div class="sidebar-bottom"><span class="storage-dot"></span><strong>@Options.StorageLabel</strong><small>Armazenamento monitorado<br />Executor: prontidão não informada</small></div>
+</aside>
+<main id="main-content" tabindex="-1">
+    <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> Monitoramento @if (selectedId is not null) { <span>/</span><strong>Detalhe do job</strong> }</div><span class="environment"><span></span> Redis</span></header>
+    <div class="content">
+        <div class="page-heading"><div><div class="eyebrow">OPERAÇÃO EM TEMPO REAL</div><h1>@(selectedId is null ? "Seus jobs, sob controle." : "Detalhe do job")</h1><p>@(selectedId is null ? "Acompanhe a fila, investigue falhas e mantenha tudo em movimento." : "Parâmetros, tentativas e cada mudança de estado em um só lugar.")</p></div>
+        <div class="refresh-controls"><label class="interval-label">Atualização<select disabled="@(module is null)" aria-label="Intervalo de atualização" @bind="refreshSeconds"><option value="0">Pausada</option><option value="5">A cada 5 s</option><option value="10">A cada 10 s</option><option value="30">A cada 30 s</option><option value="60">A cada 60 s</option></select></label><button class="button" disabled="@(loading || module is null)" @onclick="ManualRefresh"><Icon Name="refresh" />Atualizar</button></div></div>
+        <div class="connection-line" role="status"><span class="status-light @(error is null && observation is not null ? "online" : "offline")"></span>@(loading ? "Consultando armazenamento…" : error is not null ? "Dados desatualizados · consulta indisponível" : observation is null ? "Aguardando primeira leitura" : "Leitura do armazenamento concluída")<span class="last-read">Último sucesso: @Presentation.Date(lastSuccess)</span></div>
+        @if (error is not null) { <div class="notice danger" role="alert"><strong>Não foi possível atualizar.</strong> @error Os últimos dados disponíveis são mantidos abaixo. <button class="text-button" @onclick="ManualRefresh" disabled="@(loading || module is null)">Tentar novamente</button></div> }
+        @if (feedback is not null) { <div class="notice" role="status">@feedback <button class="text-button" @onclick="() => feedback = null" aria-label="Dispensar mensagem">×</button></div> }
+        @if (forbidden) { <div class="empty"><h2>Acesso não autorizado</h2><p>A política de acesso do host não permite abrir este dashboard.</p></div> }
+        else if (observation is null) { <div class="skeleton" aria-busy="@loading"><div></div><div></div><div></div><p>@(error is null ? "Preparando o painel…" : "A leitura estará disponível quando a conexão for restabelecida.")</p></div> }
+        else if (selectedId is null)
+        {
+            <section class="metrics" aria-label="Jobs por estado">
+                @foreach (var state in States)
+                {
+                    <a class="metric @Presentation.Key(state) @(stateFilter == state ? "selected" : "")" href="@StateUrl(state)"><div class="metric-top"><span>@Presentation.State(state)</span><span class="metric-icon"><Icon Name="@Presentation.Key(state)" /></span></div><strong>@observation.Counts[state]</strong><small>@StateDescription(state) <span>↗</span></small></a>
+                }
+            </section>
+            <section class="overview-strip" aria-label="Resumo da observação"><div><span class="eyebrow">PANORAMA DA FILA</span><h2>@observation.Items.Count <span>jobs observados</span></h2><div class="distribution">@foreach (var state in States) { <span class="@Presentation.Key(state)" style="width: @(observation.Items.Count == 0 ? 0 : 100.0 * observation.Counts[state] / observation.Items.Count)%" title="@Presentation.State(state): @observation.Counts[state]"></span> }</div></div><div class="retry-summary"><Icon Name="scheduled" /><div><strong>@observation.Retries aguardando retry</strong><small>Nova tentativa após o atraso configurado</small></div><a href="@StateUrl(JobState.Scheduled)">Ver agendados →</a></div></section>
+            <section class="panel jobs-panel" aria-labelledby="jobs-heading">
+                <div class="panel-heading"><div><h2 id="jobs-heading">@(stateFilter is { } currentState ? Presentation.State(currentState) : "Todos os jobs") <span class="count-pill">@tablePage?.Total</span></h2><p>Encontre um job e acompanhe sua execução.</p></div><a class="text-button" href="@ListUrl()">Limpar filtros</a></div>
+                <form class="filters" @onsubmit="ApplyFilters" @onsubmit:preventDefault>
+                    <label class="search-field"><Icon Name="search" /><input disabled="@(module is null)" aria-label="Buscar por ID ou nome" placeholder="Buscar por nome ou ID do job…" @bind="search" maxlength="200" /></label>
+                    <label>Estado<select disabled="@(module is null)" @bind="stateInput"><option value="">Todos os estados</option>@foreach (var state in States) { <option value="@Presentation.Key(state)">@Presentation.State(state)</option> }</select></label>
+                    <label>Criados desde (UTC)<input disabled="@(module is null)" type="date" @bind="fromDate" @bind:format="yyyy-MM-dd" /></label>
+                    <label>Criados antes de (UTC)<input disabled="@(module is null)" type="date" @bind="untilDate" @bind:format="yyyy-MM-dd" /></label>
+                    <label>Ordenar<select disabled="@(module is null)" @bind="sortInput"><option value="Newest">Mais recentes</option><option value="Oldest">Mais antigos</option><option value="Updated">Última atualização</option><option value="Name">Nome do contrato</option></select></label>
+                    <button class="button primary" disabled="@(module is null)" type="submit">Filtrar</button>
+                </form>
+                @if (filterError is not null) { <div class="notice danger" role="alert">@filterError</div> }
+                @if (tablePage is { Items.Count: > 0 })
+                {
+                    <div class="table-scroll"><table><thead><tr><th scope="col">JOB / IDENTIFICADOR</th><th scope="col">ESTADO</th><th scope="col">TENTATIVAS</th><th scope="col">CRIADO EM · UTC</th><th scope="col">TEMPO / ELEGIBILIDADE</th><th scope="col"><span class="sr-only">Abrir</span></th></tr></thead><tbody>
+                    @foreach (var item in tablePage.Items)
+                    {
+                        <tr @key="item.Id"><td><a class="job-name" href="@JobUrl(item.Id)">@item.Name</a><div class="job-id"><a href="@JobUrl(item.Id)"><code>@item.Id</code></a><button disabled="@(module is null)" class="icon-button" aria-label="Copiar ID do job @item.Id" @onclick="() => Copy(item.Id)"><Icon Name="copy" /></button></div></td><td><StateBadge State="item.State" />@if (item.IsRetry) { <small class="cell-note">Retry automático</small> }</td><td><span class="attempt-count">@item.Attempts <span>/ @item.MaxAttempts</span></span><small class="cell-note">no ciclo atual</small></td><td class="date-cell">@item.CreatedAt.ToString("dd MMM yyyy", Pt)<small>@item.CreatedAt.ToString("HH:mm:ss.fff")</small></td><td><strong class="time-value">@ItemTime(item)</strong><small class="cell-note">@TimeLabel(item)</small></td><td><a class="open-job" aria-label="Abrir job @item.Id" href="@JobUrl(item.Id)">→</a></td></tr>
+                    }
+                    </tbody></table></div>
+                }
+                else { <div class="empty"><span class="empty-icon"><Icon Name="jobs" /></span><h3>@(observation.Items.Count == 0 ? "Tudo pronto para o primeiro job" : "Nenhum job corresponde aos filtros")</h3><p>@(observation.Items.Count == 0 ? "Os jobs aparecerão aqui quando sua aplicação os enviar para este armazenamento." : "Experimente outro nome, estado ou período de criação.")</p></div> }
+                @if (tablePage is not null) { <footer class="pagination"><span>@tablePage.Total resultado(s) · página @tablePage.Page de @Math.Max(1, (tablePage.Total + tablePage.PageSize - 1) / tablePage.PageSize)</span><label>Por página<select disabled="@(module is null)" value="@tablePage.PageSize" @onchange="ChangePageSize"><option>10</option><option>25</option><option>50</option><option>100</option></select></label><div><button class="button" disabled="@(tablePage.Page <= 1)" @onclick="() => GoPage(tablePage.Page - 1)">← Anterior</button><button class="button" disabled="@(tablePage.Page * tablePage.PageSize >= tablePage.Total)" @onclick="() => GoPage(tablePage.Page + 1)">Próxima →</button></div></footer> }
+            </section>
+        }
+        else
+        {
+            <a class="back-link" href="@WithoutJob()"><Icon Name="back" />Voltar à listagem com os filtros</a>
+            @if (job is null) { <div class="empty"><h2>@(loading ? "Consultando job…" : error is not null ? "Detalhe indisponível" : "Job não encontrado")</h2><p><code>@selectedId</code></p></div> }
+            else
+            {
+                <section class="panel detail-heading"><div><span class="eyebrow">@job.Name</span><h2><code>@job.Id</code><button disabled="@(module is null)" class="icon-button" aria-label="Copiar ID" @onclick="() => Copy(job.Id)"><Icon Name="copy" /></button></h2><StateBadge State="job.State" /></div><div class="actions">@if (Presentation.CanRequeue(job.State)) { <button class="button primary" disabled="@(mutating || module is null)" @onclick="() => OpenConfirmation(true)"><Icon Name="refresh" />Reenfileirar</button> }@if (Presentation.CanDelete(job.State)) { <button class="button destructive" disabled="@(mutating || module is null)" @onclick="() => OpenConfirmation(false)"><Icon Name="deleted" />Deletar pendência</button> }@if (job.State == JobState.Processing) { <small>Execução em andamento · sem cancelamento</small> }</div></section>
+                <section class="detail-grid" aria-label="Resumo do job"><div class="panel fact"><span>Tentativas no ciclo atual</span><strong>@job.Attempts / @job.MaxAttempts</strong><small>@job.AttemptHistory.Count tentativa(s) em todos os ciclos</small></div><div class="panel fact"><span>Atraso fixo de retry</span><strong>@Presentation.Duration(TimeSpan.FromMilliseconds(job.RetryDelayMs))</strong><small>Contado a partir do fim da falha</small></div><div class="panel fact"><span>@(job.State == JobState.Scheduled ? "Elegível a partir de" : "Última atualização")</span><strong class="small-date">@Presentation.Date(job.ScheduledAt ?? job.UpdatedAt)</strong><small>@(job.State == JobState.Scheduled ? job.Attempts > 0 ? "Retry automático" : "Agendamento inicial" : "Estado persistido")</small></div></section>
+                <section class="panel"><div class="panel-heading"><h2>Tempos e configuração</h2></div><dl class="facts"><div><dt>Criação</dt><dd>@Presentation.Date(job.CreatedAt)</dd></div><div><dt>Atualização</dt><dd>@Presentation.Date(job.UpdatedAt)</dd></div><div><dt>Ciclo atual · espera e execução</dt><dd>@Presentation.Duration((Presentation.CanRequeue(job.State) ? job.UpdatedAt : now) - Presentation.CurrentCycleStartedAt(job))</dd></div><div><dt>Início do ciclo atual</dt><dd>@Presentation.Date(Presentation.CurrentCycleStartedAt(job))</dd></div><div><dt>Espera na fila atual</dt><dd>@(job.State == JobState.Enqueued ? Presentation.Duration(now - job.UpdatedAt) : "—")</dd></div><div><dt>Execução em andamento</dt><dd>@(job.State == JobState.Processing ? Presentation.Duration(now - job.AttemptHistory[^1].StartedAt) : "—")</dd></div><div><dt>Execução acumulada concluída</dt><dd>@Presentation.Duration(TimeSpan.FromTicks(job.AttemptHistory.Where(a => a.FinishedAt is not null && a.Outcome != JobAttemptOutcome.Interrupted).Sum(a => (a.FinishedAt!.Value - a.StartedAt).Ticks)))</dd></div><div><dt>Tempo até elegibilidade</dt><dd>@(job.ScheduledAt is { } due ? due <= now ? "Elegível · aguardando executor" : Presentation.Duration(due - now) : "—")</dd></div></dl><p class="panel-footnote">Tempos em andamento usam o relógio local do servidor e a última leitura persistida. Uma interrupção mede o intervalo observado até a recuperação, sem afirmar quando a função parou.</p></section>
+                <section class="panel"><div class="panel-heading"><div><h2>Parâmetros</h2><p>Argumentos persistidos · JSON</p></div><button class="button" disabled="@(module is null)" @onclick="() => Copy(Arguments)"><Icon Name="copy" />Copiar JSON</button></div><pre class="json" tabindex="0">@Arguments</pre></section>
+                <section class="panel"><div class="panel-heading"><div><h2>Tentativas <span class="count-pill">@job.AttemptHistory.Count</span></h2><p>Histórico completo, incluindo erros de ciclos anteriores.</p></div></div>
+                    @if (job.AttemptHistory.Count == 0) { <p class="empty-inline">Nenhuma tentativa iniciada.</p> }
+                    else { var cycles = Presentation.AttemptCycles(job); <div class="table-scroll"><table class="attempt-table"><thead><tr><th>CICLO / TENTATIVA</th><th>INÍCIO · UTC</th><th>FIM · UTC</th><th>DURAÇÃO</th><th>RESULTADO / ERRO</th></tr></thead><tbody>@for (var i = 0; i < job.AttemptHistory.Count; i++) { var attempt = job.AttemptHistory[i]; <tr @key="i"><td><strong>Ciclo @(i < cycles.Count ? cycles[i] : 0) · #@attempt.Attempt</strong><small class="cell-note">Registro @(i + 1)</small></td><td class="date-cell">@Presentation.Date(attempt.StartedAt)</td><td class="date-cell">@Presentation.Date(attempt.FinishedAt)</td><td>@Presentation.Duration((attempt.FinishedAt ?? now) - attempt.StartedAt)<small class="cell-note">@(attempt.Outcome == JobAttemptOutcome.Interrupted ? "Intervalo até recuperação" : attempt.FinishedAt is null ? "Em andamento" : "Execução concluída")</small></td><td><strong>@Presentation.Outcome(attempt.Outcome)</strong>@if (attempt.Error is not null) { <details class="attempt-error" open="@(attempt == job.AttemptHistory.LastOrDefault())"><summary>Mensagem de erro</summary><pre tabindex="0">@attempt.Error</pre></details> }</td></tr> }</tbody></table></div> }
+                </section>
+                <section class="panel"><div class="panel-heading"><h2>Histórico de estados <span class="count-pill">@job.History.Count</span></h2></div><ol class="timeline">@foreach (var entry in job.History) { <li><StateBadge State="entry.State" /><time>@Presentation.Date(entry.At)</time><span>@entry.Reason</span></li> }</ol></section>
+            }
+        }
+        @if (observation is not null) { <footer class="data-note"><Icon Name="scheduled" /><span>Observação: @Presentation.Date(observation.StartedAt) — @Presentation.Date(observation.FinishedAt). Consistência por job; sem snapshot global. Indicadores abrangem todos os jobs observados, independentemente dos filtros.</span></footer> }
+    </div>
+</main>
+<dialog @ref="confirmation" @oncancel="CancelConfirmation" @oncancel:preventDefault aria-labelledby="confirmation-title" aria-describedby="confirmation-description">
+    <div class="dialog-icon"><Icon Name="@(requeue ? "refresh" : "deleted")" /></div><h2 id="confirmation-title">@(requeue ? "Reenfileirar este job?" : "Deletar a pendência?")</h2><p id="confirmation-description">@(requeue ? "O job volta à fila com o contador de tentativas zerado. O ID, os parâmetros e todos os históricos serão preservados." : "O job pendente será marcado como deletado. O histórico será preservado.") O estado será conferido atomicamente pela biblioteca.</p><code class="confirm-id">@confirmationId</code><div class="dialog-actions"><button class="button cancel-confirmation" disabled="@(mutating || module is null)" @onclick="CancelConfirmation">Cancelar</button><button class="button @(requeue ? "primary" : "destructive")" disabled="@(mutating || module is null)" @onclick="Confirm">@(mutating ? "Enviando…" : requeue ? "Confirmar reenfileiramento" : "Confirmar deleção")</button></div>
+</dialog>
+<div id="components-reconnect-modal" class="reconnect-overlay"><div><h2>Conexão com o painel interrompida</h2><p>Os dados podem estar desatualizados. Se uma ação estava em andamento, seu resultado não está confirmado: consulte o histórico antes de reenviar. Reconectar não repete ações.</p><button class="button" onclick="window.location.reload()">Reconectar</button></div></div>
+</div>

@@ -1,0 +1,22 @@
+@page "/"
+@using Microsoft.AspNetCore.Components.Web
+@using BackgroundJobs.Dashboard.Components
+@using static Microsoft.AspNetCore.Components.Web.RenderMode
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <base href="@BaseHref" />
+    <link rel="stylesheet" href="@Assets["_content/BackgroundJobs.Dashboard/dashboard.css"]" />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+<body>
+    <Dashboard @rendermode="InteractiveServer" />
+    <script src="@Assets["_framework/blazor.web.js"]"></script>
+</body>
+</html>
+@code {
+    [CascadingParameter] public Microsoft.AspNetCore.Http.HttpContext Context { get; set; } = default!;
+    private string BaseHref => $"{Context.Request.PathBase}/";
+}

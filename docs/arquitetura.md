@@ -43,7 +43,7 @@ Há um único processo executor por armazenamento, conforme a spec. Não é nece
 
 ## 3. Organização da solução
 
-Há dois projetos de produção e três de testes. A organização por pastas separa responsabilidades sem exigir um assembly para cada camada. O scheduler e a recuperação integram `JobServer`.
+Há duas bibliotecas, uma aplicação consumidora e três projetos de testes. A organização por pastas separa responsabilidades sem exigir um assembly para cada camada. O scheduler e a recuperação integram `JobServer`.
 
 ```text
 src/
@@ -54,6 +54,8 @@ src/
     Storage/
       Redis/          # Persistência e scripts Lua
     Hosting/          # Integração com DI e IHostedService
+
+  BackgroundJobs.Dashboard/       # Extensão opcional, componentes e assets
 
   BackgroundJobs.Demo/
     Endpoints/        # Contratos HTTP e tradução de erros
@@ -83,6 +85,30 @@ O motor de processamento, agendamento e retry é implementado no projeto. Biblio
 A biblioteca não depende de ASP.NET Core. Os endpoints ficam na demo e chamam serviços públicos da biblioteca.
 
 A demo valida os parâmetros específicos das suas funções no contrato HTTP. O registro de cada função também fornece à biblioteca a validação dos seus argumentos, aplicada na criação e novamente antes da execução, inclusive no uso sem HTTP. A biblioteca valida suas próprias opções, nomes registrados e operações de estado. Nenhum endpoint implementa processamento, espera de agendamento ou retry.
+
+### 3.3 Extensão opcional de monitoramento
+
+O dashboard é distribuído como pacote opcional `BackgroundJobs.Dashboard`, com componentes Blazor no servidor. A aplicação ASP.NET Core consumidora instala o pacote e chama somente `builder.Services.AddBackgroundJobsDashboard()`. O pacote disponibiliza `/dashboard/`, incluindo páginas, recursos estáticos, endpoints interativos e middleware. A Demo usa PackageReference para as duas bibliotecas e demonstra essa mesma API pública. O núcleo não referencia ASP.NET Core ou a interface.
+
+Um `IStartupFilter` monta um pipeline isolado sob `DashboardOptions.Path`, com padrão `/dashboard`. O pacote mantém seu roteamento e antiforgery dentro desse caminho, preservando os endpoints da aplicação. A base dos links e da conexão interativa acompanha o caminho do painel. O pacote carrega o manifesto de recursos estáticos do build; a publicação usa `wwwroot`. A dependência de assets do ASP.NET Core inclui o runtime Blazor por NuGet, inclusive em consumidores sem arquivos Razor próprios.
+
+A conexão Redis pertence à aplicação e é reutilizada via `IConnectionMultiplexer`. O gerente concreto do dashboard usa o mesmo prefixo do monitor e não substitui um `IJobManager` registrado pelo consumidor. A extensão não registra catálogo, handlers, `JobServer`, scheduler ou recuperação. Consultar ou abrir a interface não altera tentativas abertas. Acesso ao armazenamento não comprova prontidão do executor; essa informação é apresentada como não informada. As ações usam as regras atômicas de gerenciamento da biblioteca.
+
+`build.proj` tem a responsabilidade recorrente de empacotar as bibliotecas e compilar/testar/publicar a Demo consumidora. Pacotes locais e a versão exata usada pela Demo ficam no diretório de artefatos, ignorado pelo Git. As saídas padrão são `build/unix` e `build/windows`, isolando restores e geração de código entre WSL e Windows. Versões de desenvolvimento únicas evitam que um build reutilize pacotes anteriores do cache NuGet. Um consumidor publicado usa pacotes de seu feed, sem dependência desse mecanismo de desenvolvimento.
+
+`RedisJobMonitor.ReadAsync` percorre o conjunto de IDs com `SSCAN`, deduplica e consulta projeções atômicas por job em lotes de até 128. Cada projeção lê nove campos escalares e as últimas entradas de tentativa e estado, sem argumentos nem históricos completos. Não há índices adicionais ou migração de dados. O limite padrão é 10.000 jobs; `MaxJobs` permite de 1 a 100.000. Exceder o limite, encontrar metadados inválidos ou falhar no Redis invalida a leitura inteira. A projeção valida os campos consultados; a validação de argumentos e históricos completos pertence à consulta de detalhe e ao motor.
+
+`JobObservation` contém início/fim, coleção imutável, contagens dos seis estados e quantidade de retries (`scheduled` com tentativas consumidas). Não é um snapshot global: cada job é consistente, mas pode ter sido observado em momentos diferentes no intervalo. As contagens abrangem a coleção observada, independentemente dos filtros. `Query(JobMonitorQuery)` aplica estado, busca parcial por ID/nome sem distinção de caixa, período de criação inclusivo em `From` e exclusivo em `Until`, ordem e paginação de 1 a 100 itens. Datas são comparadas como instantes UTC. A ordenação usa ID ordinal como desempate; é estável dentro da observação e pode mudar entre leituras. A consulta tem custo O(N) limitado, indicado para operação local e volumes moderados; escalas maiores exigem outra estratégia de consulta, não truncamento silencioso.
+
+O cache singleton por host compartilha observações por até 5 segundos e serializa leituras concorrentes. A invalidação usa uma versão para impedir reutilização de leitura iniciada antes de uma mutação. A UI consulta a cada 10 segundos, com seleção de 5/10/30/60 segundos, pausa e atualização manual. Um timer por sessão atualiza os tempos locais sem sobrepor consultas; é cancelado no descarte do componente. Um `CircuitHandler` suspende o polling durante desconexões, inclusive enquanto Blazor retém o circuito para reconexão. A atualização manual invalida o cache. A última observação permanece visível e identificada como desatualizada em falhas. Navegação e filtros ficam na query string, incluindo o ID opaco codificado, e o retorno do detalhe preserva contexto.
+
+Espera atual na fila é o intervalo desde `UpdatedAt` em `enqueued`; execução em andamento usa o início da tentativa aberta; duração concluída usa fim menos início. A tabela identifica a última execução, inclusive de ciclo anterior quando o contador atual é zero. O tempo do ciclo atual inclui espera e execução, da criação ou do último reenfileiramento até o estado final ou o instante local em andamento. O acumulado concluído soma tentativas finalizadas não interrompidas. Interrupção mostra intervalo observado até recuperação, não duração exata da função. Elegibilidade usa `ScheduledAt`; alcançar o horário não afirma promoção ou início. Ciclos são identificados pela ordem do histórico: transições de estado final para `enqueued` iniciam outro ciclo, e entradas `processing` correspondem às tentativas em ordem. A numeração reiniciada e timestamps iguais não provocam colisão.
+
+A UI usa HTML semântico, CSS responsivo e ícones SVG locais, sem dependências de frontend ou fontes externas. Argumentos e erros são texto escapado; JSON é formatado e copiável. Confirmação usa diálogo modal com foco inicial em cancelar e retorno ao acionador. Escritas bloqueiam envio duplicado enquanto pendentes, apresentam ausência/conflito e atualizam o detalhe. Falha de confirmação informa resultado incerto e nunca dispara outra chamada de escrita no painel; a reconciliação interna do gerente mantém suas garantias de domínio.
+
+O endereço e a porta pertencem à aplicação consumidora. Autenticação e políticas são configuradas por ela; `DashboardOptions.AuthorizationPolicy` permite restringir o painel, e a política é conferida no servidor antes de leituras e ações. A extensão não inclui um subsistema de login. Credenciais Redis permanecem no servidor. A interatividade usa circuito Blazor e antiforgery no pipeline do painel, sem endpoints HTTP adicionais de gerenciamento.
+
+O dashboard é uma extensão além da entrega obrigatória: a seção 2 da spec exclui interface gráfica de seu escopo. Os contratos HTTP exigidos e os critérios de aceite da biblioteca continuam válidos independentemente da extensão.
 
 ## 4. Contratos e componentes
 
@@ -671,6 +697,6 @@ A suíte `ContractEvolutionTests` verifica os seguintes cenários da arquitetura
 | Ciclos e tokens internos | Preservar numeração pública e reconhecer confirmações repetidas. |
 | Nenhuma reserva antecipada | Simplificar gerenciamento e parada, mantendo pendentes no armazenamento. |
 
-Permanecem fora do escopo múltiplas filas, prioridades, recorrência, dependências, exclusão por chave, hooks públicos, timeout de jobs, cancelamento em execução, retenção automática, autenticação e interface gráfica.
+Permanecem fora do escopo da biblioteca múltiplas filas, prioridades, recorrência, dependências, exclusão por chave, hooks públicos, timeout de jobs, cancelamento em execução, retenção automática e autenticação. Interface gráfica está fora da entrega obrigatória da spec e está planejada como extensão opcional de monitoramento, conforme a seção de limites de responsabilidade.
 
 A solução está funcionalmente pronta quando satisfaz os critérios de aceite e os contratos HTTP. A entrega inclui biblioteca, demo, exemplo de uso sem HTTP, instruções de instalação, execução, teste e reinício, além das evidências de validação e limitações encontradas.

@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using BackgroundJobs;
 using BackgroundJobs.Hosting;
+using BackgroundJobs.Dashboard;
 using BackgroundJobs.Demo.Events;
 using BackgroundJobs.Demo.Endpoints;
 using BackgroundJobs.Demo.Jobs;
@@ -42,6 +43,7 @@ builder.Services.AddSingleton(services =>
         services.GetRequiredService<IConnectionMultiplexer>(), workerCount: workerCount);
 });
 builder.Services.AddHostedService<JobServerHostedService>();
+builder.Services.AddBackgroundJobsDashboard();
 builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = Timeout.InfiniteTimeSpan);
 
 var app = builder.Build();
