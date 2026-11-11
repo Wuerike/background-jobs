@@ -12,10 +12,10 @@ public sealed partial class ConcurrencyTests
     }
 
     [Theory]
-    [InlineData("missing")] [InlineData("residual")]
+    [InlineData("missing")] [InlineData("recovery-error")]
     public async Task Failed_startup_checks_prevent_scheduler_selection_and_promotion(string failure)
     {
-        var store = new Store { Residual = failure == "residual" };
+        var store = new Store { RecoverySelectionError = failure == "recovery-error" };
         if (failure == "missing") store.References = [new("a", "missing", JobState.Scheduled)];
         await using var server = new JobServer(new(), store);
         await Assert.ThrowsAsync<InvalidOperationException>(() => server.StartAsync());

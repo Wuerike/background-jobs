@@ -16,6 +16,8 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
     private static readonly string PromoteScript = LoadScript("processing-common") + "\n" + LoadScript("promote");
     private static readonly string ManageScript = LoadScript("processing-common") + "\n" + LoadScript("manage");
     private static readonly string ScheduledReadScript = LoadScript("processing-common") + "\n" + LoadScript("read-scheduled");
+    private static readonly string RecoverScript = LoadScript("processing-common") + "\n" + LoadScript("recover");
+    internal const int RecoveryBatchSize = 128;
     internal const int ScheduledBatchSize = 128;
     private readonly IDatabase database;
     private readonly string prefix;
@@ -129,16 +131,19 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         for (var i = 0; i < job.History.Count; i++)
         {
             var change = job.History[i];
+            if (string.IsNullOrWhiteSpace(change.Reason) || (i > 0 && !ValidStateTransition(job.History[i - 1].State, change)))
+                throw new InvalidDataException($"Inconsistent state transition for '{job.Id}'.");
             if (change.Reason == "manual requeue") number = 0;
             if (change.State != JobState.Processing) continue;
             if (record >= job.AttemptHistory.Count)
                 throw new InvalidDataException($"Missing recorded attempt for '{job.Id}'.");
             var attempt = job.AttemptHistory[record++];
             if (attempt.Attempt != ++number || attempt.StartedAt != change.At ||
+                (attempt.Outcome == JobAttemptOutcome.Interrupted && string.IsNullOrWhiteSpace(attempt.Error)) ||
                 (i + 1 == job.History.Count ? attempt.FinishedAt is not null || attempt.Error is not null :
                     attempt.FinishedAt != job.History[i + 1].At ||
                     (job.History[i + 1].State == JobState.Succeeded ? attempt.Outcome != JobAttemptOutcome.Succeeded || attempt.Error is not null :
-                        attempt.Outcome is not (JobAttemptOutcome.Failed or JobAttemptOutcome.Interrupted))))
+                        !ValidAttemptTransition(job, attempt, job.History[i + 1].State))))
                 throw new InvalidDataException($"Inconsistent recorded attempt for '{job.Id}'.");
         }
         if (number != job.Attempts || record != job.AttemptHistory.Count)
@@ -151,12 +156,29 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
                 : job.AttemptHistory.Any(a => a.FinishedAt is null)) ||
             (job.State is JobState.Scheduled or JobState.Enqueued && job.Attempts >= job.MaxAttempts) ||
             (job.State == JobState.Succeeded && (attempts.Length == 0 || attempts[^1].Outcome != JobAttemptOutcome.Succeeded)) ||
-            (job.State == JobState.Failed && (job.Attempts != job.MaxAttempts || attempts[^1].Outcome != JobAttemptOutcome.Failed)) ||
+            (job.State == JobState.Failed && (job.Attempts != job.MaxAttempts || attempts[^1].Outcome is not (JobAttemptOutcome.Failed or JobAttemptOutcome.Interrupted))) ||
             (job.State == JobState.Scheduled && job.Attempts > 0 &&
                 (attempts[^1].Outcome != JobAttemptOutcome.Failed || attempts[^1].FinishedAt!.Value.AddMilliseconds(job.RetryDelayMs) != job.ScheduledAt)))
             throw new InvalidDataException($"Inconsistent attempt metadata for '{job.Id}'.");
         return cycle;
     }
+
+    private static bool ValidAttemptTransition(JobDetails job, JobAttempt attempt, JobState next) => next switch
+    {
+        JobState.Scheduled => attempt.Outcome == JobAttemptOutcome.Failed && attempt.Attempt < job.MaxAttempts,
+        JobState.Enqueued => attempt.Outcome == JobAttemptOutcome.Interrupted && attempt.Attempt < job.MaxAttempts && !string.IsNullOrEmpty(attempt.Error),
+        JobState.Failed => attempt.Outcome is JobAttemptOutcome.Failed or JobAttemptOutcome.Interrupted && attempt.Attempt == job.MaxAttempts,
+        _ => false
+    };
+
+    private static bool ValidStateTransition(JobState previous, JobStateChange change) => previous switch
+    {
+        JobState.Scheduled => change.State is JobState.Enqueued or JobState.Deleted,
+        JobState.Enqueued => change.State is JobState.Processing or JobState.Deleted,
+        JobState.Processing => change.State is JobState.Enqueued or JobState.Scheduled or JobState.Succeeded or JobState.Failed,
+        JobState.Succeeded or JobState.Failed or JobState.Deleted => change.State == JobState.Enqueued && change.Reason == "manual requeue",
+        _ => false
+    };
 
     private RedisKey[] ProcessingKeys(string id) => [.. Keys(id), $"{prefix}:processing"];
 
@@ -166,14 +188,75 @@ internal sealed class RedisJobStore : IJobStore, IProcessingStore
         await foreach (var value in database.SetScanAsync($"{prefix}:jobs", pageSize: 128).ConfigureAwait(false))
         {
             var id = (string)value!;
-            var detail = await GetAsync(id).ConfigureAwait(false)
-                ?? throw new InvalidDataException($"Missing indexed job '{id}'.");
+            var (detail, _, _) = await ReadIndexedSnapshot(id).ConfigureAwait(false);
             yield return new JobReference(id, detail.Name, detail.State);
         }
     }
 
     public async Task<bool> HasProcessingAsync() =>
         await database.SetLengthAsync($"{prefix}:processing").ConfigureAwait(false) != 0;
+
+    private async Task<(JobDetails Job, string Snapshot, Dictionary<string, string> Fields)> ReadIndexedSnapshot(string id)
+    {
+        var raw = (RedisResult[])(await database.ScriptEvaluateAsync(ScheduledReadScript, ProcessingKeys(id), [id]).ConfigureAwait(false))!;
+        var snapshot = MaterializeProcessingSnapshot(id, raw[..3]);
+        ValidateManagement(snapshot.Job, snapshot.Fields);
+        if (snapshot.Job.ScheduledAt is { } due &&
+            JobCodec.ScheduledScore(due) != double.Parse((string)raw[3]!, CultureInfo.InvariantCulture))
+            throw new InvalidDataException($"Invalid scheduled metadata for '{id}'.");
+        return snapshot;
+    }
+
+    public async Task<IReadOnlyList<RecoveryCandidate>> ReadRecoveryAsync()
+    {
+        var candidates = new List<RecoveryCandidate>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        // Restart the non-destructive scan after each shrinking batch. COUNT is only
+        // a Redis hint; the consumer bounds and deduplicates the materialized batch.
+        await foreach (var value in database.SetScanAsync($"{prefix}:processing", pageSize: RecoveryBatchSize).ConfigureAwait(false))
+        {
+            var id = (string)value!;
+            if (!seen.Add(id)) continue;
+            var (job, snapshot, _) = await ReadIndexedSnapshot(id).ConfigureAwait(false);
+            if (job.State != JobState.Processing) throw new InvalidDataException($"Non-processing recovery candidate '{id}'.");
+            candidates.Add(new(job, snapshot));
+            if (candidates.Count == RecoveryBatchSize) break;
+        }
+        return candidates;
+    }
+
+    public async Task<RecoveryResult> TryRecoverAsync(RecoveryCandidate candidate, DateTimeOffset now)
+    {
+        var job = candidate.Job;
+        now = now.ToUniversalTime();
+        if (job.State != JobState.Processing || now < job.UpdatedAt || job.AttemptHistory.Count == 0 ||
+            job.AttemptHistory[^1].FinishedAt is not null || now < job.AttemptHistory[^1].StartedAt)
+            throw new InvalidDataException("Invalid recovery eligibility or time.");
+        var open = job.AttemptHistory[^1];
+        var state = job.Attempts < job.MaxAttempts ? "enqueued" : "failed";
+        var at = JobCodec.DateText(now);
+        var attempt = JsonSerializer.Serialize(new { attempt = open.Attempt, startedAt = JobCodec.DateText(open.StartedAt),
+            finishedAt = at, outcome = "interrupted", error = "Execution interrupted by process termination." });
+        var history = JsonSerializer.Serialize(new { state, at, reason = "interrupted execution recovered" });
+        var result = (RedisResult[])(await database.ScriptEvaluateAsync(RecoverScript, ProcessingKeys(job.Id),
+            [job.Id, candidate.Snapshot, at, state, attempt, history]).ConfigureAwait(false))!;
+        if (result.Length == 1 && (long)result[0] == 1) return RecoveryResult.Recovered;
+        if (result.Length == 5 && (long)result[0] == 0)
+        {
+            var (current, _, fields) = MaterializeProcessingSnapshot(job.Id, result[1..4]);
+            ValidateManagement(current, fields);
+            if (current.ScheduledAt is { } due &&
+                JobCodec.ScheduledScore(due) != double.Parse((string)result[4]!, CultureInfo.InvariantCulture))
+                throw new InvalidDataException($"Invalid scheduled metadata for '{job.Id}'.");
+            // A stale recovery must prove this exact attempt was interrupted, even
+            // when deletion or a manual cycle has subsequently advanced the job.
+            var recovered = current.AttemptHistory[job.AttemptHistory.Count - 1];
+            if (recovered.Outcome != JobAttemptOutcome.Interrupted)
+                throw new InvalidDataException("Recovery candidate advanced without interruption.");
+            return RecoveryResult.AlreadyAdvanced;
+        }
+        throw new InvalidDataException("Redis did not confirm recovery.");
+    }
 
     private async Task<(JobDetails Job, string Snapshot, Dictionary<string, string> Fields)> ReadProcessingSnapshot(string id)
     {

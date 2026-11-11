@@ -4,7 +4,7 @@
 
 Este documento registra a arquitetura baseada na [especificação funcional](spec-base.md), distinguindo o código disponível dos componentes planejados.
 
-A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados registro tipado, criação e consulta, reserva e conclusão atômicas e execução imediata com quantidade configurável de workers, padrão 4. `JobServer` oferece inicialização, disponibilidade e parada; `JobServerHostedService` o integra ao host. A demo executa os três jobs da spec e expõe criação, listagem, detalhe, deleção, reenfileiramento, eventos e health. Agendamentos e retries são promovidos e executados pela biblioteca. Gerenciamento preserva os históricos entre ciclos; recuperação após queda permanece planejada.
+A solução usa .NET 10, ASP.NET Core com Minimal APIs e Redis com persistência AOF. Estão implementados registro tipado, criação e consulta, reserva e conclusão atômicas e execução imediata com quantidade configurável de workers, padrão 4. `JobServer` oferece inicialização, disponibilidade e parada; `JobServerHostedService` o integra ao host. A demo executa os três jobs da spec e expõe criação, listagem, detalhe, deleção, reenfileiramento, eventos e health. Agendamentos e retries são promovidos e executados pela biblioteca. Gerenciamento preserva os históricos entre ciclos; recuperação após queda fecha tentativas interrompidas antes da prontidão.
 
 A entrega prevista é uma biblioteca com motor próprio de processamento e uma aplicação demonstrativa. A biblioteca executa as funções dentro do processo da aplicação consumidora; Redis é o serviço externo de armazenamento.
 
@@ -43,7 +43,7 @@ Há um único processo executor por armazenamento, conforme a spec. Não é nece
 
 ## 3. Organização da solução
 
-Há dois projetos de produção e três de testes. A organização por pastas separa responsabilidades sem exigir um assembly para cada camada. O scheduler integra `JobServer`; recuperação permanece planejada.
+Há dois projetos de produção e três de testes. A organização por pastas separa responsabilidades sem exigir um assembly para cada camada. O scheduler e a recuperação integram `JobServer`.
 
 ```text
 src/
@@ -100,7 +100,7 @@ A demo valida os parâmetros específicos das suas funções no contrato HTTP. O
 | `IJobStore` | Definir operações persistentes com semântica de domínio. |
 | `RedisJobStore` | Implementar o armazenamento e as operações atômicas. |
 
-Os contratos internos de armazenamento expressam operações de domínio: criação, consulta, listagem, deleção, reenfileiramento, promoção, reserva e conclusão disponíveis, com recuperação planejada. Um repositório CRUD genérico não expressa os requisitos de consistência entre job, índices, tentativa e histórico.
+Os contratos internos de armazenamento expressam operações de domínio: criação, consulta, listagem, deleção, reenfileiramento, recuperação, promoção, reserva e conclusão. Um repositório CRUD genérico não expressa os requisitos de consistência entre job, índices, tentativa e histórico.
 
 O armazenamento persiste um descritor da chamada: identificador estável do contrato e argumentos JSON. Delegates e instâncias de serviços são registrados novamente pela aplicação a cada inicialização. Nomes desconhecidos devem resultar em erro explícito; jobs persistidos nunca são descartados por ausência de registro. A inicialização confere a disponibilidade dos handlers referenciados pelos jobs armazenados, inclusive finalizados que podem ser reenfileirados, antes de liberar o processamento.
 
@@ -170,11 +170,11 @@ O conteúdo Unicode bem formado é preservado sem normalização. Um conversor i
 
 `JobOptions` é imutável após inicialização: `MaxAttempts` tem padrão 3 e faixa 1–10; `RetryDelayMs`, padrão 1000 e faixa 0–60000; `RunAt` é `DateTimeOffset?`. Opções nulas na API C# equivalem aos padrões. Após validar, uma única leitura de `TimeProvider` define `createdAt`, `updatedAt`, histórico inicial e comparação temporal. Horário futuro produz `scheduled` e `scheduledAt` UTC, preservando ticks; ausência, passado ou igualdade produzem `enqueued` e `scheduledAt = null`. O pedido preparado tem zero tentativas e histórico de tentativas vazio. O cliente associa um ID ao snapshot preparado e aguarda confirmação do armazenamento. A escrita reconhece repetições equivalentes pelo ID e identidade imutável; não há loop próprio de retransmissão ou reconciliação de rede.
 
-`IJobStore` oferece criação, consulta, listagem e mutações manuais. `IProcessingStore` define `ReadReferencesAsync`, `HasProcessingAsync`, `ReadScheduledAsync`, `TryPromoteAsync`, `PeekAsync`, `TryClaimAsync` e `CompleteAsync`; `RedisJobStore` implementa ambos. A separação permite controlar o processamento em testes sem implementar operações de criação sem uso naquele cenário.
+`IJobStore` oferece criação, consulta, listagem e mutações manuais. `IProcessingStore` define `ReadReferencesAsync`, `HasProcessingAsync`, `ReadRecoveryAsync`, `TryRecoverAsync`, `ReadScheduledAsync`, `TryPromoteAsync`, `PeekAsync`, `TryClaimAsync` e `CompleteAsync`; `RedisJobStore` implementa ambos. A separação permite controlar o processamento em testes sem implementar operações de criação sem uso naquele cenário.
 
 `JobCandidate` reúne o detalhe materializado, o snapshot exato do hash e listas, o ciclo interno e a posição FIFO capturada junto do ID da cabeça. `ClaimedJob` reúne os argumentos conferidos, número, ciclo, token e início confirmados. `AttemptCompletion` captura o fim e o erro uma vez; erro nulo significa sucesso. O worker reconstrói os argumentos persistidos, sem reutilizar objetos do produtor.
 
-A recuperação automática de tentativas interrompidas ainda está planejada.
+`RecoveryCandidate` mantém o detalhe e o snapshot completo da tentativa interrompida; `TryRecoverAsync` distingue recuperação confirmada de candidato cujo histórico comprova avanço válido da mesma tentativa.
 
 O worker confere o handler pelo nome antes da reserva e chama `JobHandlers.InvokeAsync` somente após a confirmação. O registro genérico constrói o adaptador com o conhecimento do tipo concreto dos argumentos:
 
@@ -388,6 +388,7 @@ As operações implementadas são:
 | [`manage.lua`](../src/BackgroundJobs/Storage/Redis/manage.lua) | Decide ausência, conflito ou mutação manual com snapshot, tipos e índices conferidos; preserva históricos e atribui ciclo/posição novos somente no reenfileiramento. |
 | [`read-scheduled.lua`](../src/BackgroundJobs/Storage/Redis/read-scheduled.lua) | Captura snapshot e score atuais de um candidato selecionado, permitindo validar ou descartar a geração sem misturar leituras. |
 | [`claim.lua`](../src/BackgroundJobs/Storage/Redis/claim.lua) | Confere cabeça, snapshot e índices; retira de `ready`, inclui em `processing`, abre tentativa e registra a transição. |
+| [`recover.lua`](../src/BackgroundJobs/Storage/Redis/recover.lua) | Fecha a tentativa interrompida, invalida a confirmação antiga e reenfileira sem atraso ou finaliza por orçamento; repetição comprovada não escreve. |
 | [`complete.lua`](../src/BackgroundJobs/Storage/Redis/complete.lua) | Fecha tentativa, remove de `processing`, persiste sucesso, falha terminal ou agendamento de retry; confirma reenvios equivalentes. |
 
 Essas operações usam scripts Lua versionados junto ao código da biblioteca e executados por `RedisJobStore`. Os scripts verificam precondições antes das escritas e trabalham com lotes limitados. As chaves acessadas devem ser fornecidas explicitamente à chamada do script.
@@ -462,9 +463,9 @@ Reenvios equivalentes de criação e conclusão são reconhecidos pelo armazenam
 
 ## 10. Inicialização e recuperação
 
-A inicialização disponível verifica acesso ao armazenamento, percorre referências de todos os jobs em páginas de `SSCAN` e confere handlers, inclusive de finalizados. O diagnóstico identifica nomes e IDs ausentes, sem consumir tentativas. Também verifica o índice `processing` e os estados persistidos: resíduos impedem prontidão com diagnóstico de recuperação necessária. Registros sem ciclo/token são aceitos sem migração, com ciclo inicial `0` e token atribuído na reserva. Depois das verificações, o servidor promove uma página limitada de vencidos, instala o scheduler e os N loops e publica prontidão somente se não houver parada ou falha. O scheduler continua os lotes restantes sem esperar futuros vencerem. Parar durante a verificação impede a liberação dos workers e aguarda a inicialização terminar. Um handler ausente encontrado após a inicialização também impede reserva e torna o servidor indisponível.
+A inicialização disponível verifica acesso ao armazenamento, percorre referências de todos os jobs em páginas de `SSCAN` e confere handlers, inclusive de finalizados. O diagnóstico identifica nomes e IDs ausentes, sem consumir tentativas. Também confere os índices e os estados persistidos nos dois sentidos: job `processing` fora do set e membro órfão são erros explícitos. Todos os resíduos válidos são recuperados antes de qualquer promoção ou worker. Registros sem ciclo usam o ciclo inicial `0`; a reserva atribui token e posição da tentativa. Resíduos em `processing` exigem token e posição válidos. Depois das verificações, o servidor promove uma página limitada de vencidos, instala o scheduler e os N loops e publica prontidão somente se não houver parada ou falha. O scheduler continua os lotes restantes sem esperar futuros vencerem. Parar durante a verificação impede a liberação dos workers e aguarda a inicialização terminar. Um handler ausente encontrado após a inicialização também impede reserva e torna o servidor indisponível.
 
-A sequência completa com recuperação ainda planejada é:
+A sequência de inicialização é:
 
 1. Validar configuração, registros de funções e ausência de identificadores duplicados.
 2. Conectar ao Redis e preparar o armazenamento e os scripts.
@@ -474,12 +475,18 @@ A sequência completa com recuperação ainda planejada é:
 6. Iniciar scheduler e workers.
 7. Marcar o servidor como apto a processar.
 
-Para cada job em `processing`, a recuperação planejada deverá fechar a tentativa aberta como `interrupted`, registrar fim e motivo da interrupção, retirar o job desse índice e aplicar a seguinte transição:
+Para cada job em `processing`, a recuperação fecha a tentativa aberta como `interrupted`, registra fim e motivo da interrupção, retira o job desse índice e aplica a seguinte transição:
 
 - Move para `enqueued`, sem atraso, se houver tentativas disponíveis.
 - Move para `failed` se o limite tiver sido atingido.
 
-A recuperação é atômica por job e pode ser retomada caso outra queda aconteça durante seu andamento. Ela não apaga tentativas nem reinicia o contador.
+A recuperação é atômica por job e pode ser retomada caso outra queda aconteça durante seu andamento. Ela não apaga tentativas nem reinicia o contador ou ciclo. A seleção usa `SSCAN` não destrutivo sobre `processing`, limita/deduplica no consumidor até 128 candidatos e recomeça a varredura do conjunto restante após confirmar cada lote. `COUNT` é uma indicação, não um teto; a enumeração continua em páginas vazias com cursor não final. Referência: [SCAN/SSCAN](https://redis.io/docs/latest/commands/scan/).
+
+Cada candidato é materializado e validado com hash, listas, ciclo, token, posição da última tentativa aberta, orçamento e índices exclusivos. `recover.lua` compara o snapshot e valida todos os tipos/parâmetros antes da primeira escrita. Com orçamento restante, valida também sequência canônica, limite `2^53 - 1` e cauda FIFO; terminais não precisam de nova posição. Uma única data UTC de `TimeProvider` fecha a tentativa e atualiza o job/histórico. Retrocesso temporal falha sem escrita.
+
+O script fecha somente a tentativa aberta como `interrupted`, preservando número e início; remove token/posição/recibos antigos, `scheduledAt` e associação a `processing`. Reenfileirados ganham nova sequência, depois dos já prontos, sem atraso de retry. O ciclo permanece inclusive no máximo de 64 bits. Conclusões da tentativa antiga falham antes e depois de uma nova reserva ou ciclo manual.
+
+Reapresentação exige prova de avanço com dados imutáveis, prefixos de históricos, fechamento `interrupted` da tentativa correspondente, transições/ciclo/contador e índices válidos. Não altera datas nem posição de fila. Seleção e confirmação usam a barreira de admissão: parada aguarda uma operação admitida, impede a seguinte e não publica prontidão. Falha de leitura/preparação/confirmação é fatal, sem repetir escrita incerta nem invocar funções; transições anteriores permanecem e nova instância retoma do estado real. Não há transação global do lote.
 
 Jobs pendentes permanecem disponíveis, e os finalizados continuam consultáveis. Os eventos em memória da demo podem ser perdidos.
 
@@ -489,16 +496,16 @@ A garantia é **at-least-once, sujeita ao limite de tentativas**. Uma função p
 
 A parada segue esta ordem:
 
-1. Fechar a admissão de novas reservas e promoções e marcar o servidor como indisponível.
+1. Fechar a admissão de novas recuperações, reservas e promoções e marcar o servidor como indisponível.
 2. Interromper as esperas por trabalho.
 3. Aguardar inicialização, scheduler e workers, incluindo leituras, promoções e reservas admitidas ainda sem resposta e funções em execução.
 4. Confirmar suas conclusões antes de liberar recursos; falhas de confirmação mantêm diagnóstico fatal.
 
-Reservas, promoções e a entrada em parada usam uma barreira comum para impedir que um job pendente seja assumido durante a transição. Não há cancelamento público de funções em execução.
+Recuperações, reservas, promoções e a entrada em parada usam uma barreira comum para impedir que um job pendente seja assumido durante a transição. Não há cancelamento público de funções em execução.
 
 `JobServerHostedService` adapta o ciclo a `IHostedService`. O sinal compartilhado é descartado somente depois do término de todos os loops. O sinal de parada interrompe somente a busca e a espera ociosa; nenhuma função recebe cancelamento. Uma reserva ou promoção admitida antes da parada, mesmo sem resposta Redis ainda, integra o trabalho aguardado. O adaptador aguarda mesmo com token do host expirado e a demo configura `HostOptions.ShutdownTimeout = Timeout.InfiniteTimeSpan`. Referência: [hosted services no ASP.NET Core](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/host/hosted-services?view=aspnetcore-10.0).
 
-Se houver encerramento forçado, a inicialização disponível recusa resíduos de `processing`. Sua recuperação automática ainda não está implementada e a comprovação em processos separados está pendente.
+Se houver encerramento forçado, a próxima inicialização recupera resíduos válidos de `processing` antes de liberar workers. A parada não cancela confirmação em andamento; resíduos não recuperados permanecem para nova instância.
 
 ## 12. Persistência e configuração local
 
@@ -512,20 +519,20 @@ Preservar a configuração já prevista para Redis:
 
 A política `always` sincroniza o AOF a cada escrita, com maior custo de I/O. O pedido só é considerado aceito após a confirmação da operação persistente. Referência: [persistência do Redis](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/).
 
-### 12.1 Compatibilização de `DATA_DIR`
+### 12.1 Diretório persistido
 
-A spec exige `DATA_DIR`, mas o Compose atual usa um volume nomeado. A proposta é usar, no ambiente local, uma montagem bind de `${DATA_DIR:-./data}` para `/data` no container Redis.
+O Compose monta `${DATA_DIR:-./data}` em `/data` com bind explícito. Caminhos relativos são resolvidos a partir do diretório do arquivo Compose; caminhos com espaços funcionam como um único valor. O diretório deve permitir escrita pelo Redis. A biblioteca e a demo usam `REDIS_CONNECTION`; configurar `DATA_DIR` no processo .NET não transfere armazenamento externo. AOF, `appendfsync always`, `noeviction` e ausência de TTL são preservados.
 
-Esse ajuste ainda precisa ser implementado. Dados existentes no volume nomeado precisam ser preservados ou migrados explicitamente quando a configuração for alterada; esta proposta não solicita sua remoção.
+A passagem de volume nomeado exige parar escritores e Redis, identificar o volume efetivo, copiar todo `/data` para destino vazio preservando permissões e conferir dados e execução antes de liberar escritores. O AOF multipartes exige manifesto e segmentos, não apenas um arquivo. A origem permanece para retorno; não mesclar arquivos nem executar dois Redis no mesmo diretório. O [README](../README.md#preservar-um-volume-nomeado-existente) contém o procedimento. Montagem padrão/alternativa, recriação, isolamento e transferência com retorno à origem foram verificados em Docker Desktop com recursos descartáveis. O Compose resolve o caminho no sistema do CLI; na validação pelo CLI Windows, os caminhos do arquivo Compose e de `DATA_DIR` são Windows. Os testes de sinais executam processos Linux/WSL nativos.
 
 | Configuração | Padrão | Uso |
 | --- | --- | --- |
 | `PORT` | `8080` | Porta HTTP da demo. |
 | `WORKER_COUNT` | `4` | Quantidade fixa de workers. Valor fornecido deve representar inteiro positivo de 32 bits; vazio, formato inválido, zero, negativo ou overflow impedem a inicialização com diagnóstico da configuração. |
-| `DATA_DIR` | `./data` (spec) | Configuração ainda não consumida; o Compose usa o volume `redis-data`. |
+| `DATA_DIR` | `./data` | Diretório do host montado em `/data` pelo Compose. |
 | `REDIS_CONNECTION` | `127.0.0.1:6379` | Configuração adicional para a conexão da biblioteca. |
 
-`DATA_DIR` deverá configurar o armazenamento no Compose; a biblioteca acessa esse armazenamento pelo Redis. A documentação de execução deve explicar essa relação e o uso dos mesmos dados após reinício.
+`DATA_DIR` configura o armazenamento no Compose; a biblioteca acessa esse armazenamento pelo Redis. Reinícios usam o mesmo diretório e conexão.
 
 ## 13. API HTTP
 
@@ -570,7 +577,7 @@ Os erros HTTP usam `{ "error": "mensagem legível" }`:
 
 Não são necessários filtros ou paginação.
 
-`/health` retorna `200 { "status": "ok" }` somente após as verificações iniciais e com todos os workers operacionais. Na entrega disponível, resíduos que exigem recuperação impedem o início; falhas observadas de armazenamento tornam o servidor indisponível. Durante inicialização, indisponibilidade de infraestrutura ou parada, retorna `503 { "status": "unavailable" }` enquanto o HTTP estiver disponível.
+`/health` retorna `200 { "status": "ok" }` somente após as verificações iniciais e com todos os workers operacionais. Durante recuperação não há prontidão; falhas observadas de armazenamento tornam o servidor indisponível. Durante inicialização, indisponibilidade de infraestrutura ou parada, retorna `503 { "status": "unavailable" }` enquanto o HTTP estiver disponível.
 
 ## 14. Funções e eventos da demo
 

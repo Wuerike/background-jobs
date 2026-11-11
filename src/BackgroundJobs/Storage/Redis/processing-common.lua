@@ -100,7 +100,7 @@ local function checkProgress(json, id)
     local cycle = original.cycle or '0'
     local previous = cjson.decode(expected[2][#expected[2]])
     local transitions = {scheduled = {enqueued = true, deleted = true}, enqueued = {processing = true, deleted = true},
-        processing = {scheduled = true, succeeded = true, failed = true},
+        processing = {scheduled = true, succeeded = true, failed = true, enqueued = true},
         succeeded = {enqueued = true}, failed = {enqueued = true}, deleted = {enqueued = true}}
     for i = #expected[2] + 1, #history do
         local change = cjson.decode(history[i])
@@ -131,7 +131,8 @@ local function checkProgress(json, id)
     end
     local total = 0
     local count = 0
-    for _, jsonChange in ipairs(history) do
+    local max = tonumber(redis.call('HGET', KEYS[1], 'maxAttempts'))
+    for i, jsonChange in ipairs(history) do
         local change = cjson.decode(jsonChange)
         if change.reason == 'manual requeue' then count = 0 end
         if change.state == 'processing' then
@@ -139,6 +140,17 @@ local function checkProgress(json, id)
             count = count + 1
             local attempt = cjson.decode(attempts[total] or '{}')
             if attempt.attempt ~= count or attempt.startedAt ~= change.at then error('Invalid progressed attempt') end
+            if i < #history then
+                local nextChange = cjson.decode(history[i+1])
+                if attempt.finishedAt ~= nextChange.at or
+                   (nextChange.state == 'enqueued' and (attempt.outcome ~= 'interrupted' or count >= max)) or
+                   (nextChange.state == 'scheduled' and (attempt.outcome ~= 'failed' or count >= max)) or
+                   (nextChange.state == 'succeeded' and attempt.outcome ~= 'succeeded') or
+                   (nextChange.state == 'failed' and (count ~= max or
+                       (attempt.outcome ~= 'failed' and attempt.outcome ~= 'interrupted'))) then
+                    error('Invalid progressed attempt closure')
+                end
+            end
         end
     end
     if total ~= #attempts or tostring(count) ~= redis.call('HGET', KEYS[1], 'attempts') then error('Invalid progressed counter') end

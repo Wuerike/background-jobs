@@ -45,7 +45,12 @@ public sealed partial class ProcessingTests : IAsyncLifetime
     {
         var keys = connection.GetServer(connection.GetEndPoints()[0]).Keys(db.Database, prefix + ":*").OrderBy(k => k.ToString()).ToArray();
         var values = new List<string>();
-        foreach (var key in keys) values.Add(key.ToString() + ":" + Convert.ToBase64String((await db.KeyDumpAsync(key))!));
+        // Redis can rehash a set during a read-only scan, changing DUMP ordering.
+        // Compare its logical members canonically; other key dumps retain exact bytes.
+        foreach (var key in keys) values.Add(key.ToString() + ":" +
+            (await db.KeyTypeAsync(key) == RedisType.Set
+                ? System.Text.Json.JsonSerializer.Serialize((await db.SetMembersAsync(key)).Select(v => v.ToString()).Order(StringComparer.Ordinal))
+                : Convert.ToBase64String((await db.KeyDumpAsync(key))!)));
         return values.ToArray();
     }
 
@@ -322,13 +327,16 @@ public sealed partial class ProcessingTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Residual_processing_prevents_readiness_and_remains_intact()
+    public async Task Residual_processing_is_recovered_before_readiness()
     {
-        await Claim(); var snapshot = await Dump();
+        await Claim(options: new JobOptions { MaxAttempts = 1 });
         await using var server = new JobServer(registry, connection, prefix);
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => server.StartAsync());
-        Assert.Contains("exigem recuperação", error.Message); Assert.False(server.IsAvailable);
-        Assert.Equal(snapshot, await Dump());
+        await server.StartAsync();
+        Assert.True(server.IsAvailable);
+        await server.StopAsync();
+        var job = await Detail();
+        Assert.Equal(JobState.Failed, job.State);
+        Assert.Equal(JobAttemptOutcome.Interrupted, Assert.Single(job.AttemptHistory).Outcome);
     }
 
     [Fact]

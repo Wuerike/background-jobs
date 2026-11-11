@@ -1,6 +1,7 @@
 .development/
 .vscode/
 /build/
+/data/
 **/bin/
 **/obj/
 .vs/

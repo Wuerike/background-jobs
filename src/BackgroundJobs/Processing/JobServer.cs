@@ -77,14 +77,13 @@ public sealed class JobServer : IAsyncDisposable
         try
         {
             var missing = new List<string>();
-            var residual = await store.HasProcessingAsync().ConfigureAwait(false);
+            await store.HasProcessingAsync().ConfigureAwait(false);
             await foreach (var reference in store.ReadReferencesAsync().ConfigureAwait(false))
             {
                 if (!handlers.Contains(reference.Name)) missing.Add($"'{reference.Name}' (job '{reference.Id}')");
-                residual |= reference.State == JobState.Processing;
             }
             if (missing.Count > 0) throw new InvalidOperationException("Handlers ausentes: " + string.Join(", ", missing));
-            if (residual) throw new InvalidOperationException("Há jobs em processamento que exigem recuperação; o servidor não pode iniciar.");
+            await RecoverAsync().ConfigureAwait(false);
             await PromoteBatchAsync(0).ConfigureAwait(false);
             Task[] workers;
             lock (admission)
@@ -110,6 +109,31 @@ public sealed class JobServer : IAsyncDisposable
             lastError ??= failure;
             available = false;
             stopping.Cancel();
+        }
+    }
+
+    private async Task RecoverAsync()
+    {
+        while (true)
+        {
+            Task<IReadOnlyList<RecoveryCandidate>> selection;
+            lock (admission)
+            {
+                if (stopping.IsCancellationRequested) return;
+                selection = store.ReadRecoveryAsync();
+            }
+            var candidates = await selection.ConfigureAwait(false);
+            if (candidates.Count == 0) return;
+            foreach (var candidate in candidates)
+            {
+                Task<RecoveryResult> recovery;
+                lock (admission)
+                {
+                    if (stopping.IsCancellationRequested) return;
+                    recovery = store.TryRecoverAsync(candidate, clock.GetUtcNow());
+                }
+                await recovery.ConfigureAwait(false);
+            }
         }
     }
 

@@ -10,12 +10,16 @@ internal sealed class ScheduledBatch(IList<ScheduledCandidate> candidates, int? 
     public int ExaminedCount { get; } = examinedCount ?? candidates.Count;
 }
 internal enum PromotionResult { Promoted, LostRace }
+internal sealed record RecoveryCandidate(JobDetails Job, string Snapshot);
+internal enum RecoveryResult { Recovered, AlreadyAdvanced }
 internal sealed record JobReference(string Id, string Name, JobState State);
 
 internal interface IProcessingStore
 {
     IAsyncEnumerable<JobReference> ReadReferencesAsync();
     Task<bool> HasProcessingAsync();
+    Task<IReadOnlyList<RecoveryCandidate>> ReadRecoveryAsync();
+    Task<RecoveryResult> TryRecoverAsync(RecoveryCandidate candidate, DateTimeOffset now);
     Task<ScheduledBatch> ReadScheduledAsync(DateTimeOffset now, long offset);
     Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now);
     Task<JobCandidate?> PeekAsync();

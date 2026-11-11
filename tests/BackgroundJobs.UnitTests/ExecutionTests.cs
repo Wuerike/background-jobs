@@ -72,7 +72,7 @@ public sealed class ExecutionTests
         public readonly Queue<JobCandidate> Candidates = [];
         public readonly List<AttemptCompletion> Completions = [];
         public readonly List<JobReference> References = [];
-        public bool Residual { get; set; }
+        public bool RecoverySelectionError { get; set; }
         public Exception? PeekError;
         public Exception? ClaimError;
         public Exception? CompleteError;
@@ -86,7 +86,11 @@ public sealed class ExecutionTests
             await Task.CompletedTask;
             foreach (var reference in References) yield return reference;
         }
-        public Task<bool> HasProcessingAsync() => Task.FromResult(Residual);
+        public Task<bool> HasProcessingAsync() => Task.FromResult(false);
+        public Task<IReadOnlyList<RecoveryCandidate>> ReadRecoveryAsync() => RecoverySelectionError
+            ? throw new InvalidOperationException("Recovery selection failed.")
+            : Task.FromResult<IReadOnlyList<RecoveryCandidate>>([]);
+        public Task<RecoveryResult> TryRecoverAsync(RecoveryCandidate candidate, DateTimeOffset now) => throw new NotSupportedException();
         public Task<ScheduledBatch> ReadScheduledAsync(DateTimeOffset now, long offset) => Task.FromResult(new ScheduledBatch([]));
         public Task<PromotionResult> TryPromoteAsync(ScheduledCandidate candidate, DateTimeOffset now) => throw new NotSupportedException();
         public Task<JobCandidate?> PeekAsync()

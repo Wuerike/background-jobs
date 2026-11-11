@@ -28,7 +28,11 @@ public sealed partial class ConcurrencyTests
         public Func<ClaimedJob, Task>? AcknowledgeClaim;
         public Func<AttemptCompletion, Task>? Complete;
         public TaskCompletionSource? Initialization;
-        public bool Residual;
+        public Func<Task>? BeforeReferences;
+        public bool RecoverySelectionError;
+        public Func<Task<IReadOnlyList<RecoveryCandidate>>>? SelectRecovery;
+        public Func<RecoveryCandidate, DateTimeOffset, Task<RecoveryResult>>? Recover;
+        public int RecoverySelections, Recoveries;
         public JobReference[] References = [];
         public Func<DateTimeOffset, long, Task<IReadOnlyList<ScheduledCandidate>>>? SelectScheduled;
         public Func<ScheduledCandidate, DateTimeOffset, Task<PromotionResult>>? Promote;
@@ -38,13 +42,24 @@ public sealed partial class ConcurrencyTests
         {
             Interlocked.Increment(ref Checks);
             if (Initialization is not null) await Initialization.Task;
-            return Residual;
+            return false;
         }
         public async IAsyncEnumerable<JobReference> ReadReferencesAsync()
         {
             Interlocked.Increment(ref Scans);
-            await Task.CompletedTask;
+            if (BeforeReferences is not null) await BeforeReferences();
             foreach (var reference in References) yield return reference;
+        }
+        public Task<IReadOnlyList<RecoveryCandidate>> ReadRecoveryAsync()
+        {
+            Interlocked.Increment(ref RecoverySelections);
+            if (RecoverySelectionError) throw new InvalidOperationException("Recovery selection failed.");
+            return SelectRecovery?.Invoke() ?? Task.FromResult<IReadOnlyList<RecoveryCandidate>>([]);
+        }
+        public Task<RecoveryResult> TryRecoverAsync(RecoveryCandidate candidate, DateTimeOffset now)
+        {
+            Interlocked.Increment(ref Recoveries);
+            return Recover!(candidate, now);
         }
         public async Task<ScheduledBatch> ReadScheduledAsync(DateTimeOffset now, long offset)
         {
@@ -344,10 +359,10 @@ public sealed partial class ConcurrencyTests
     }
 
     [Theory]
-    [InlineData("stop-before")] [InlineData("stop-during")] [InlineData("residual")] [InlineData("missing")]
+    [InlineData("stop-before")] [InlineData("stop-during")] [InlineData("recovery-error")] [InlineData("missing")]
     public async Task Initialization_never_releases_workers_after_stop_or_failed_checks(string scenario)
     {
-        var store = new Store(Candidate("a")) { Initialization = Signal(), Residual = scenario == "residual" };
+        var store = new Store(Candidate("a")) { Initialization = Signal(), RecoverySelectionError = scenario == "recovery-error" };
         if (scenario == "missing") store.References = [new("a", "missing", JobState.Succeeded)];
         var server = new JobServer(new(), store);
         try
@@ -378,7 +393,7 @@ public sealed partial class ConcurrencyTests
     public async Task Repeated_start_shares_initialization_result_after_fatal_failure_without_restarting(bool duringInitialization)
     {
         var error = new IOException("read failure");
-        var store = new Store { Residual = duringInitialization, Peek = _ => Task.FromException<JobCandidate?>(error) };
+        var store = new Store { RecoverySelectionError = duringInitialization, Peek = _ => Task.FromException<JobCandidate?>(error) };
         await using var server = new JobServer(new(), store);
         var first = server.StartAsync();
         if (duringInitialization) await Assert.ThrowsAsync<InvalidOperationException>(() => first);

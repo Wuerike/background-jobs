@@ -14,7 +14,9 @@ services:
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
-      - redis-data:/data
+      - type: bind
+        source: ${DATA_DIR:-./data}
+        target: /data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -22,6 +24,3 @@ services:
       retries: 5
       start_period: 5s
     restart: unless-stopped
-
-volumes:
-  redis-data:

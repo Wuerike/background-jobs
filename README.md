@@ -9,7 +9,7 @@ Biblioteca em .NET 10, baseada em [docs/spec-base.md](docs/spec-base.md).
 - `tests/BackgroundJobs.IntegrationTests`: criação atômica, consulta consistente, índices e concorrência com Redis real.
 - `tests/BackgroundJobs.HttpTests`: contratos HTTP, validação de entrada e integração com Redis real.
 
-A biblioteca cria, consulta, agenda e executa jobs com quantidade configurável de workers, padrão 4. Falhas com orçamento restante voltam à fila após o atraso fixo contado do fim da tentativa; sucesso ou esgotamento encerram o job. Estados, histórico e tentativas são persistentes. Listagem, deleção lógica de pendentes e reenfileiramento manual de finalizados estão disponíveis pela biblioteca e HTTP. Recuperação após queda ainda não está implementada.
+A biblioteca cria, consulta, agenda e executa jobs com quantidade configurável de workers, padrão 4. Falhas com orçamento restante voltam à fila após o atraso fixo contado do fim da tentativa; sucesso ou esgotamento encerram o job. Estados, histórico e tentativas são persistentes. Listagem, deleção lógica de pendentes e reenfileiramento manual de finalizados estão disponíveis pela biblioteca e HTTP. Antes da prontidão, a recuperação fecha tentativas abertas como `interrupted`: reenfileira imediatamente quando resta orçamento ou finaliza em `failed` quando o limite foi atingido. A tentativa interrompida conta no limite; funções podem repetir efeitos externos após uma queda (at-least-once sujeito ao orçamento).
 
 ## Registro de contratos
 
@@ -84,9 +84,9 @@ A conexão é criada, compartilhada e descartada pelo chamador; os serviços nã
 
 O ID retorna somente após confirmação da criação. A escrita inclui dados, histórico e índices na mesma operação. Jobs futuros ficam `Scheduled`, com data exata preservada, e o scheduler da biblioteca os promove à fila quando elegíveis, sem antecipar a data. A mesma promoção atende retries, atribuindo nova posição FIFO e preservando tentativas. O scheduler usa páginas de até 128 candidatos e polling ocioso de 100 ms, independente dos workers. Não há loop próprio de retry/reconciliação de falhas de rede; uma falha de confirmação não deve ser interpretada como prova de ausência do pedido. Chamadas públicas independentes geram IDs distintos.
 
-`JobServer` verifica handlers de todos os jobs armazenados, inclusive finalizados, antes de liberar os workers. `processing` residual impede prontidão com diagnóstico de recuperação pendente. `IsAvailable` informa disponibilidade e `LastError` expõe erro fatal. Erros de desserialização, validação ou função fecham a tentativa e não impedem outros jobs; falhas Redis nos workers ou no scheduler fecham a admissão de reservas e promoções e cancelam suas esperas ociosas, sem reinvocar funções. O primeiro diagnóstico é preservado; reservas já admitidas continuam sendo aguardadas e, quando confirmadas, executam e tentam persistir o resultado.
+`JobServer` verifica handlers de todos os jobs armazenados, inclusive finalizados, antes de liberar os workers. Resíduos válidos de `processing` são recuperados antes da prontidão; corrupção mantém o servidor indisponível. `IsAvailable` informa disponibilidade e `LastError` expõe erro fatal. Erros de desserialização, validação ou função fecham a tentativa e não impedem outros jobs; falhas Redis nos workers ou no scheduler fecham a admissão de reservas e promoções e cancelam suas esperas ociosas, sem reinvocar funções. O primeiro diagnóstico é preservado; reservas já admitidas continuam sendo aguardadas e, quando confirmadas, executam e tentam persistir o resultado.
 
-`StartAsync` inicia uma instância uma única vez e compartilha a inicialização entre chamadas repetidas. `StopAsync` fecha novas reservas e aguarda inicialização, scheduler, promoções e reservas admitidas, funções e confirmações; não cancela handlers. A parada é idempotente. Para outro ciclo de serviço, crie uma nova instância. `JobServerHostedService`, em `BackgroundJobs.Hosting`, oferece integração `IHostedService`; o host deve permitir espera ilimitada na parada, como na composição da demo.
+`StartAsync` inicia uma instância uma única vez e compartilha a inicialização entre chamadas repetidas. `StopAsync` fecha novas recuperações, promoções e reservas e aguarda inicialização, scheduler e operações admitidas, funções e confirmações; não cancela handlers. A parada é idempotente. Para outro ciclo de serviço, crie uma nova instância. `JobServerHostedService`, em `BackgroundJobs.Hosting`, oferece integração `IHostedService`; o host deve permitir espera ilimitada na parada, como na composição da demo.
 
 ## Redis local
 
@@ -96,9 +96,10 @@ O storage escolhido para os jobs é Redis. O `compose.yaml` usa a imagem oficial
 A política `noeviction` impede a remoção automática de chaves por pressão de memória.
 Referência: [persistência do Redis](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/).
 
-Na raiz do projeto, com Docker e Docker Compose disponíveis, inicie o serviço:
+Para dados existentes em volume nomeado, execute primeiro o [procedimento de preservação](#preservar-um-volume-nomeado-existente). Na raiz do projeto, com Docker e Docker Compose disponíveis, inicie o serviço:
 
 ```bash
+mkdir -p ./data
 docker compose up -d --wait redis
 docker compose exec redis redis-cli ping
 ```
@@ -122,8 +123,69 @@ docker compose logs -f redis
 docker compose down
 ```
 
-O volume `redis-data` é mantido ao parar ou recriar o container. O comando
-`docker compose down -v` também remove o volume e apaga os dados locais.
+`DATA_DIR` configura uma montagem bind para `/data`; ausente ou vazia usa `./data`, relativo ao diretório do arquivo Compose. O diretório deve existir e permitir escrita pelo usuário Redis do container; não aplique permissões amplas. O entrypoint da imagem oficial ajusta o proprietário quando iniciado como root; em ambientes que impedem esse ajuste, prepare o proprietário antes de iniciar. `/data/` na raiz do repositório é ignorado pelo Git. Para outro caminho, inclusive com espaços:
+
+```bash
+mkdir -p "$PWD/dados locais"
+DATA_DIR="$PWD/dados locais" REDIS_PORT=6380 docker compose up -d --wait redis
+DATA_DIR="$PWD/dados locais" REDIS_PORT=6380 docker compose config
+```
+
+Use os mesmos valores de diretório e porta em cada comando Compose. `docker compose down` e a recriação do container preservam os arquivos no host. Um diretório vazio diferente representa outro armazenamento; não execute dois Redis no mesmo diretório. Exportar `DATA_DIR` somente para o processo .NET não move os dados de um Redis externo. Nesse caso, configure o diretório e AOF no próprio servidor e mantenha a mesma `REDIS_CONNECTION` no reinício.
+
+Para conferir o padrão e a montagem efetiva:
+
+```bash
+mkdir -p ./data
+docker compose config
+docker compose up -d --wait redis
+docker inspect "$(docker compose ps -q redis)" --format '{{json .Mounts}}'
+docker compose exec redis redis-cli CONFIG GET appendonly appendfsync maxmemory-policy dir
+```
+
+### Preservar um volume nomeado existente
+
+Registre IDs e detalhes dos jobs para comparar depois. Antes de iniciar o bind sobre dados existentes, pare todos os executores/produtores e o container Redis. Identifique o volume do projeto correto pela etiqueta e confira seus containers; não escolha um volume apenas pelo nome sugerido:
+
+```bash
+docker volume ls --filter label=com.docker.compose.volume=redis-data
+# Preencha com o nome efetivo conferido na saída e no inspect:
+SOURCE_VOLUME=nome_do_volume_existente
+docker volume inspect "$SOURCE_VOLUME"
+docker ps -a --filter volume="$SOURCE_VOLUME"
+docker compose stop redis
+```
+
+Confirme que nenhum container usando esse volume permanece ativo. Copie todo o conteúdo persistido, incluindo subdiretórios, manifesto e segmentos do AOF multipartes, para um destino **vazio**; mantenha a origem:
+
+```bash
+mkdir -p "$PWD/dados preservados"
+export DATA_DIR="$PWD/dados preservados"
+docker volume inspect "$SOURCE_VOLUME" >/dev/null &&
+docker run --rm --entrypoint sh \
+  --mount "type=volume,source=$SOURCE_VOLUME,target=/source,readonly" \
+  --mount "type=bind,source=$DATA_DIR,target=/destination" \
+  redis:8.2.10-alpine -c 'test -z "$(ls -A /destination)" && cp -a /source/. /destination/'
+docker compose up -d --wait redis
+```
+
+A cópia preserva permissões e recusa mesclar dados. Confira montagem, configuração, IDs, argumentos, opções, tentativas e históricos pela API antes de liberar escritores; execute um novo job de controle. Mantenha o volume original até verificar a leitura e execução pelo destino. Não use `down -v`, não exclua a origem e não copie apenas um suposto `appendonly.aof`. Para retorno, pare os escritores e o Redis do bind e monte o volume original em `/data` num Redis com a mesma imagem e opções AOF; não execute simultaneamente origem e destino. A origem conserva somente o estado no instante da cópia; escritas feitas depois no destino precisam ser preservadas antes de qualquer retorno.
+
+Com escritores parados, uma forma de iniciar a origem preservada é:
+
+```bash
+docker compose down
+docker volume inspect "$SOURCE_VOLUME" >/dev/null &&
+docker run -d --name background-jobs-redis-retorno \
+  -p "127.0.0.1:${REDIS_PORT:-6379}:6379" \
+  --mount "type=volume,source=$SOURCE_VOLUME,target=/data" \
+  redis:8.2.10-alpine redis-server --appendonly yes --appendfsync always \
+  --save "" --maxmemory-policy noeviction
+```
+
+Consulte os IDs e históricos esperados antes de voltar a liberar escritores. O diretório do bind continua preservado.
+
+A montagem e a transferência foram verificadas com Docker Desktop, Redis 8.2.10 e dados descartáveis. Confirme a conexão com o daemon em `docker version` antes de executar os comandos; no WSL, o CLI Linux requer integração com a distribuição. A validação de armazenamento pelo CLI do Windows usa caminhos Windows para o arquivo Compose e `DATA_DIR`.
 
 ## SDK no WSL
 
@@ -166,7 +228,7 @@ WORKER_COUNT=1 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
 WORKER_COUNT=2 dotnet run --project src/BackgroundJobs.Demo --no-launch-profile
 ```
 
-Use apenas um executor por armazenamento. `DATA_DIR` ainda não é consumido; o Compose mantém os dados no volume `redis-data`.
+Use apenas um executor por armazenamento. `DATA_DIR` configura o diretório do Redis no Compose; `REDIS_CONNECTION` aponta a biblioteca e a demo para esse serviço.
 
 Os diretórios de saída são centralizados na pasta `build/` da raiz por `Directory.Build.props`, usando o [layout de artefatos do SDK](https://learn.microsoft.com/pt-br/dotnet/core/sdk/artifacts-output):
 
@@ -271,6 +333,8 @@ A listagem retorna `200 { "items": [{ "id": "...", "name": "log-message", "state
 
 ## Validar
 
+A suíte completa requer Linux/WSL, Redis acessível por `REDIS_CONNECTION` e um executável `redis-server` para os testes de processos dedicados. Configure `REDIS_SERVER_EXECUTABLE` quando esse executável estiver fora do PATH. A seção de testes de processos abaixo descreve o comando separado e a opção de executar os contratos HTTP em outras plataformas.
+
 ```bash
 dotnet restore BackgroundJobs.slnx
 dotnet build BackgroundJobs.slnx
@@ -294,7 +358,7 @@ A cobertura está nos [testes unitários](tests/BackgroundJobs.UnitTests), nos [
 
 Os testes HTTP de criação/consulta isolam o motor na composição de teste. Os testes de execução usam o motor ativo; os de configuração preservam a criação real do `JobServer` pelo `Program`, isolando configuração por host e chaves pela conexão de teste. Todos param o servidor antes da limpeza. Não há flag de produto para desativar o motor.
 
-O resultado verificado é build sem avisos ou erros e **590 testes aprovados** (197 unitários, 248 de integração e 145 HTTP), sem falhas ou testes ignorados, com SDK 10.0.114 e Redis 8.2.10 na porta 16379, AOF, `appendfsync always` e `noeviction`. A cobertura inclui limite e progresso dos workers, disputa pela mesma cabeça, FIFO com timestamps iguais, isolamento de erros de função, falha fatal global, espera por reservas/conclusões pendentes, inicialização e parada coordenadas. A integração verifica índices, snapshots e execução dos pendentes por nova instância após parada limpa.
+O resultado verificado é build sem avisos ou erros e **653 testes aprovados** (208 unitários, 292 de integração e 153 HTTP, incluindo oito de processos), sem falhas ou testes ignorados, com SDK 10.0.114 e Redis 8.2.10 (porta 16379 para testes de prefixos e portas isoladas nos testes de processos), AOF, `appendfsync always` e `noeviction`. A cobertura inclui limite e progresso dos workers, disputa pela mesma cabeça, FIFO com timestamps iguais, isolamento de erros de função, falha fatal global, espera por reservas/conclusões pendentes, inicialização e parada coordenadas. A integração verifica índices, snapshots e execução dos pendentes por nova instância após parada limpa.
 
 A demonstração em processos reais usou um Redis dedicado vazio por cenário, com as mesmas configurações de persistência e portas isoladas:
 
@@ -329,6 +393,35 @@ O critério de operações manuais foi demonstrado com processos reais da demo e
 
 São observações locais, sem garantia de tempo real. Para reproduzir, crie uma mensagem com `runAt` três segundos à frente, delete-a e consulte eventos depois desse horário; em seguida execute `fail-n-times` com `failTimes: 1`, `maxAttempts: 2`, `retryDelayMs: 500`, capture o detalhe final, reenfileire o mesmo ID e compare os prefixos de `history`/`attemptHistory`. As regressões duráveis estão em [ManagementTests](tests/BackgroundJobs.IntegrationTests/ManagementTests.cs), [ManagementConcurrencyTests](tests/BackgroundJobs.IntegrationTests/ManagementConcurrencyTests.cs), [ManagerTests](tests/BackgroundJobs.UnitTests/ManagerTests.cs) e [ManagementHttpTests](tests/BackgroundJobs.HttpTests/ManagementHttpTests.cs). Elas cobrem todos os estados, listagem paginada internamente e deduplicada, confirmação incerta sem repetição, corrupção sem escrita parcial, ciclos de 64 bits, limites FIFO, snapshots, disputas controladas com reserva/promoção e progresso após descarte de uma página inteira de agendamentos.
 
-Nesse ambiente WSL, sem Docker disponível, Redis usa a distribuição oficial compilada em `/tmp`, com Zig 0.14.1 e runtime libgcc 13.3. Para reprodução habitual, use o Compose documentado ou Redis externo com as mesmas configurações; configure `REDIS_CONNECTION` com a porta escolhida.
+A validação usa Redis 8.2.10. Os testes de sinais executam processos nativos Linux/WSL; na verificação, o executável e suas bibliotecas vieram da imagem oficial `redis:8.2.10-alpine`. Para reprodução, forneça um executável nativo pelo PATH ou por `REDIS_SERVER_EXECUTABLE`. O armazenamento dos testes de prefixos pode usar o Compose ou Redis externo equivalente, configurado por `REDIS_CONNECTION`.
 
-Os critérios 1 a 7 da spec estão verificados. Recuperação após queda e `DATA_DIR` ainda não estão implementados. As operações reconhecem reenvios equivalentes de criação/conclusão, mas não há reconciliação ou retomada automática após falha de confirmação. A parada básica foi verificada com sinais e Redis real; validação de parada com funções ativas em processos separados e recuperação após `kill -9` ainda estão pendentes.
+Recuperação automática e configuração `DATA_DIR` estão implementadas. A inicialização verifica todos os handlers, inclusive de finalizados, e a associação dos índices antes de recuperar resíduos em lotes de até 128. Cada recuperação preserva dados/ciclo/históricos, fecha a última tentativa e invalida a confirmação antiga. Corrupção e relógio anterior à atualização falham explicitamente; uma falha mantém o motor indisponível e preserva `LastError`. Recuperações já confirmadas permanecem e uma nova instância retoma as restantes. Não há reconciliação ou retomada automática após falha de confirmação.
+
+Na parada, `SIGTERM` e `SIGINT` fecham a admissão, aguardam funções e persistência sem cancelá-las; pendentes permanecem para outra instância. O host da demo tem espera ilimitada. `SIGKILL` encerra imediatamente; no próximo início, uma função interrompida pode executar novamente. Eventos em memória pertencem apenas à instância que os registrou; a recuperação não sintetiza `finished`.
+
+Os critérios 8–10 foram demonstrados por processos reais em Linux/WSL, com Redis 8.2.10 dedicado por cenário, AOF, `appendfsync always` e `noeviction`:
+
+| Comportamento | Resultado observado |
+| --- | --- |
+| SIGKILL da demo e reinício de Redis normal/forçado | Jobs finais, deletado, ciclo manual, argumentos, opções e históricos idênticos; agendado distante preservado. Vencido concluiu 126,98 ms e 105,50 ms após prontidão, respectivamente. |
+| SIGKILL durante função com três tentativas disponíveis | Tentativa 1 `interrupted`, tentativa 2 executada e sucesso; sem passagem por `scheduled` nem espera dos 60 s de retry configurado. |
+| SIGKILL durante função com `maxAttempts=1` | `failed` com uma tentativa `interrupted`, sem novos eventos; reenfileiramento manual preservou o registro e executou nova tentativa 1. |
+| SIGTERM com uma função de 35 s e pendente | Drenagem em 35,02 s, saída 0; ativa terminou em sucesso, pendente permaneceu com zero tentativas e executou após reinício. |
+| SIGINT com um worker / SIGTERM com dois workers | Drenagens de 4,02 s / 4,04 s, saída 0, todas as funções ativas confirmadas e pendente preservado. |
+| Diretórios nativos isolados e cópia AOF multipartes | Outro diretório vazio não revelou os dados; cópia integral de manifesto/base/incremental reiniciou com o mesmo histórico, aceitou novo job e preservou os arquivos de origem. |
+| Bind Compose padrão e alternativo com espaços | Montagens em `/data`, porta e configuração conferidas no container; recriação preservou os dados, outro diretório começou vazio e o retorno ao primeiro preservou seus quatro jobs. |
+| Transferência de volume nomeado para bind | Cópia integral com `cp -a`, UID/GID e modos preservados (diretório AOF 0700, arquivos 0600), manifesto presente e hashes de todos os arquivos iguais antes de iniciar o destino; mesmos IDs, argumentos, opções, estados e históricos após reiniciar. Novo job executou no destino; retorno à origem confirmou seu conjunto exato de quatro IDs, sem incluir a escrita feita no destino. |
+
+São observações locais, sem garantia de tempo real. A regressão permanente está em [ProcessLifecycleTests](tests/BackgroundJobs.HttpTests/ProcessLifecycleTests.cs), com processos controlados por [ProcessHost](tests/BackgroundJobs.HttpTests/ProcessHost.cs). [RecoveryTests de integração](tests/BackgroundJobs.IntegrationTests/RecoveryTests.cs) verificam ambos os orçamentos, FIFO, múltiplos ciclos, 270 resíduos em lotes limitados, deduplicação, metadados/índices corrompidos sem escrita parcial, tempo/sequência/ciclo extremos, confirmação antiga, recuperação parcial e resposta perdida. [RecoveryTests unitários](tests/BackgroundJobs.UnitTests/RecoveryTests.cs) verificam checagens completas de handlers, ordem de inicialização, prontidão, falhas e parada com operações admitidas.
+
+Os testes de processos requerem Linux/WSL, .NET e um executável Redis com AOF (8.2.10 usado na validação). Criam processos, diretórios e portas exclusivos e nunca reiniciam o serviço indicado por `REDIS_CONNECTION`. Configure o caminho quando `redis-server` não estiver no PATH:
+
+```bash
+REDIS_SERVER_EXECUTABLE=/caminho/redis-server \
+  dotnet test tests/BackgroundJobs.HttpTests --no-build --filter Category=ProcessLifecycle
+# Contratos HTTP sem os testes de sinais/processos:
+REDIS_CONNECTION=127.0.0.1:6380 \
+  dotnet test tests/BackgroundJobs.HttpTests --no-build --filter 'Category!=ProcessLifecycle'
+```
+
+A suíte completa também executa os testes de processos; ausência do executável ou plataforma incompatível produz erro explícito, sem ignorar aceite. A configuração e a execução de montagem, recriação e transferência foram verificadas com Docker Desktop 4.73.0, Engine 29.4.3 e Compose v5.1.3 pelo CLI do Windows. `DATA_DIR` padrão e alternativo com espaços, AOF multipartes, isolamento e retorno à origem foram comprovados em recursos descartáveis. As provas de sinais e de queda durante funções usam processos Linux/WSL. Os critérios 1–10 da spec estão verificados; a garantia de efeitos externos permanece at-least-once sujeita ao orçamento.
