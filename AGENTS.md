@@ -7,17 +7,19 @@ Estas instruções se aplicam a todo o repositório.
 | Arquivo | Responsabilidade | Regra de manutenção |
 | --- | --- | --- |
 | [docs/spec-base.md](docs/spec-base.md) | Requisitos funcionais, escopo e critérios de aceite. | Imutável. Não editar, reformatar ou alterar requisitos. |
-| [docs/arquitetura.md](docs/arquitetura.md) | Solução técnica, responsabilidades e decisões arquiteturais. | Evoluir conforme necessário, respeitando a spec e as necessidades concretas da implementação. |
+| [docs/arquitetura.md](docs/arquitetura.md) | Visão geral técnica, componentes, responsabilidades e principais decisões arquiteturais. | Manter a visão geral coerente com a implementação e apontar para os detalhes nos documentos temáticos. |
+| [Documentos temáticos em docs/](README.md#documentação) | Guias de execução, build e uso; contratos, processamento, persistência, API HTTP, dashboard e validação. | Atualizar o documento responsável pelo assunto conforme o código, respeitando a spec e evitando duplicação. |
 | [docs/plano-desenvolvimento.md](docs/plano-desenvolvimento.md) | Planejamento macro, metodologia, status, objetivos e dependências das etapas. | Atualizar quando houver progresso de uma etapa ou mudanças de direção, escopo, dependências ou metodologia. |
 | `.development/` | Refinamentos, ações e materiais temporários de execução de cada etapa. | Criar quantos arquivos forem necessários e limpar os materiais da etapa ao concluí-la. Diretório ignorado pelo Git. |
-| [README.md](README.md) | Instalação, execução e uso do que está disponível. | Manter coerente com o código e os comandos de execução vigentes. |
+| [README.md](README.md) | Visão geral do projeto, instalação, execução e uso básicos, além do índice da documentação. | Manter os primeiros passos reproduzíveis e o índice atualizado; encaminhar detalhes aos documentos temáticos. |
 
-Antes de implementar, consultar a spec, a arquitetura e a etapa atual do plano. Distinguir funcionalidades implementadas de trabalho planejado. Dúvidas ou incompatibilidades com a spec devem ficar explícitas no documento pertinente, sem modificar a spec para acomodar a implementação.
+Antes de implementar, consultar a spec, a arquitetura, a etapa atual do plano e os documentos temáticos relacionados à mudança. O índice no README orienta essa consulta. Distinguir funcionalidades implementadas de trabalho planejado. Dúvidas ou incompatibilidades com a spec devem ficar explícitas no documento pertinente, sem modificar a spec para acomodar a implementação.
 
 ## Estilo e atualização da documentação
 
 - Documentar apenas o estado atual: decisões vigentes, comportamento disponível, trabalho planejado e pendências atuais.
 - Atualizar diretamente as seções afetadas. Remover informações que deixaram de se aplicar e manter os documentos coerentes entre si.
+- Cada assunto detalhado tem um documento responsável. Nos demais documentos, usar sínteses e links; manter exemplos completos e procedimentos no guia correspondente. Ao reorganizar conteúdo, conferir links e preservar as âncoras referenciadas por documentos que não forem alterados.
 - Não usar estilo de changelog, deltas, entradas cronológicas, comparações de antes/depois ou referências a estados anteriores da documentação ou da implementação.
 - Explicar a justificativa da solução vigente quando isso ajudar a entendê-la, sem narrar alternativas abandonadas ou o histórico de alterações.
 - Manter evidências e informações do estudo exigidas pela spec como síntese atual e referências aos artefatos pertinentes, sem transformá-las em changelog.
@@ -47,7 +49,7 @@ Antes de implementar, consultar a spec, a arquitetura e a etapa atual do plano. 
 - Criar quantos arquivos forem úteis e organizar por etapa conforme necessário, com estrutura proporcional ao trabalho.
 - Consultar os materiais existentes em `.development/` ao retomar uma etapa. Mantê-los suficientes para identificar o objetivo, as ações pendentes, os bloqueios e o próximo passo.
 - Tratar os refinamentos como apoio temporário à execução. A spec define os requisitos; código e testes representam o comportamento implementado e sua verificação.
-- Atualizar a documentação permanente apenas com informações duradouras pertinentes: decisões na arquitetura, instruções no README e situação ou mudanças macro no plano.
+- Atualizar a documentação permanente apenas com informações duradouras pertinentes: visão geral e principais decisões na arquitetura, detalhes e instruções nos documentos temáticos, sínteses de evidências em `docs/testes-e-validacao.md`, primeiros passos e índice no README e situação ou mudanças macro no plano.
 - Ao concluir uma etapa, preservar código, testes, pendências relevantes e evidências ou informações do estudo exigidas pela spec antes de limpar seus materiais temporários.
 - Limpar apenas os materiais da etapa concluída, preservando arquivos de outros trabalhos ou ainda necessários. Os refinamentos não precisam ser versionados ou arquivados após a conclusão.
 - Aplicar também aos refinamentos textuais a regra de documentar o estado atual, sem changelog ou diário de alterações.
