@@ -323,3 +323,23 @@ Os exports foram apenas renomeados, preservando conteúdo e identidade do desenv
 tokenmetro.json  5038dc025575cb29698b4507a819cd5c557d4f493bbf8eee1d96b41d109d09c2
 tokenmetro.html  0a8064d8bf2d81af2fcc0ae74b6c9d43d280490c12caa55abb87ad9d4b01a555
 ```
+
+### Relações entre prompts e commits
+
+A aba **Prompts ↔ Commits** do [relatório integrado](workflow-analysis.html#traceability) permite explorar o histórico por commit ou por prompt. Há busca por texto, identificador e caminho de arquivo, filtros de vínculos e separação entre `main` e checkpoints. Cada commit apresenta os arquivos adicionados, modificados ou removidos, as contagens de linhas e, quando publicado, um link para suas alterações no GitHub. A apresentação mantém sua navegação própria.
+
+O [conjunto de relações](prompt-commits.json) complementa o export original, preservado com o hash acima. Contém 122 relações revisadas pelo Codex, envolvendo 120 registros e 18 dos 20 commits de `main`. Os seis registros sem vínculo independente incluem mensagens incompletas, limpeza de contexto e controles de metas interrompidas. Os dois commits de `main` sem atribuição tratam da instalação do SDK e do ignore do editor. Os 19 checkpoints pertencem a uma sessão ausente do export e não recebem links remotos sem confirmação de publicação.
+
+A análise combina três fontes:
+
+1. **Horário:** o intervalo entre commits de `main` fornece candidatos iniciais, sem excluir decisões e refinamentos anteriores. Os instantes são comparados em UTC e exibidos em `America/Sao_Paulo`.
+2. **Evidências:** sessão, turno, comandos de edição e respostas dos logs locais são confrontados com os caminhos e o conteúdo dos commits. As referências guardam identificadores de sessão/chamada e horário; não incorporam os logs completos. A extração inclui arquivos de continuação das sessões.
+3. **Revisão:** cada relação registra seu papel e sua justificativa. Planejamento, exploração, decisão, implementação, revisão, correção, documentação e pedido de commit têm significados distintos. Candidatos descartados por horário também ficam consultáveis.
+
+P090 e P100 ilustram o ajuste: aparecem segundos antes de commits sobre o trabalho anterior, mas sua conversa e suas edições correspondem, respectivamente, aos commits de concorrência e recuperação. P060 contribui para três commits por definir o tratamento de erros aplicado aos contratos, à persistência e ao HTTP. Esses casos exigem relações de muitos para muitos e análise além do intervalo imediato.
+
+“Relação revisada” indica interpretação fundamentada, não prova de autoria exclusiva ou atribuição de cada linha. Uma referência em comando de escrita pode ser leitura; uma edição pode ser reformulada antes do commit. Explorações de alternativas descartadas permanecem identificadas como contexto, sem afirmar que foram implementadas. Não há vínculos mantidos apenas por horário neste recorte; ausência de vínculo não prova ausência de contribuição.
+
+O HTML incorpora o mesmo conjunto de dados do JSON e oferece seu download na explicação do método, funcionando offline para navegação e consulta de arquivos. Os links do GitHub usam SHAs completos dos commits de `main`, alcançáveis pela referência remota conferida. Para manter o relatório, atualizar o JSON de relações e sua cópia embutida em `window.__PROMPT_COMMITS__`, preservando os IDs de prompts do export; a aba contém seu componente e estilos no próprio HTML. Não há coleta automática de novos commits ou alteração do gerador do tokenmetro.
+
+A validação do relatório confere os caminhos e as contagens de todos os 39 commits contra o Git, a integridade das relações e a igualdade entre o JSON e os dados embutidos. A verificação em Chromium cobre navegação nos dois sentidos, relações de muitos para muitos, exclusões por horário, filtros, registros sem vínculo, checkpoints, download, abertura da conversa, tema escuro e layout móvel. A navegação local não faz requisições de rede nem apresenta erros de JavaScript; os dados originais e o código da apresentação permanecem preservados. Essas verificações se referem ao relatório, sem reexecutar as suítes da biblioteca.
